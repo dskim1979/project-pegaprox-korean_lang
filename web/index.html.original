@@ -118,19 +118,15 @@
         // Generate hashes at: https://www.srihash.org/ or use jsDelivr's ?integrity query
         // Example: curl -s https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js | openssl dgst -sha384 -binary | openssl base64 -A
         // Empty string = skip SRI check (use during development, fill in for production)
+        // NS: Mar 2026 - populated SRI hashes for supply chain protection
         const SRI_HASHES = {
-            // React 18.2.0 - https://unpkg.com/react@18.2.0/umd/react.production.min.js
-            'react@18': '',
-            // React-DOM 18.2.0
-            'react-dom@18': '',
-            // Babel Standalone 7.x
-            'babel@7': '',
-            // noVNC 1.4.0
-            'novnc@1.4.0': '',
-            // xterm.js 5.3.0
-            'xterm@5.3.0': '',
-            // xterm-addon-fit 0.8.0
-            'xterm-addon-fit@0.8.0': ''
+            'react@18': 'sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z',
+            'react-dom@18': 'sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1',
+            'babel@7': 'sha384-Fo0OdKhdnE7y2WmzjOMW4PYjHkkANeu1501pWTqKrzAPeJMFQb4ZTdAA9dtrVUJV',
+            'chart.js@4': 'sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ',
+            'novnc@1.4.0': '',  // loaded as ES module, SRI not supported for dynamic import
+            'xterm@5.3.0': 'sha384-xjfWUeCWdMtvpAb/SmM6lMzS6pQGcQa0loOl1d97j6Odw0vjK9nW3+dTb/bn/mwH',
+            'xterm-addon-fit@0.8.0': 'sha384-dpjGwSSISUTz2taP54Bor7qkyMR20sSO9oe11UVYnGs2/YdUBf7HW30XKQx9PCzn'
         };
         
         function loadScriptWithFallback(cdnUrl, localUrl, integrityKey) {

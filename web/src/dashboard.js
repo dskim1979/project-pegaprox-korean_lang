@@ -23,7 +23,6 @@
             
             // Ensure tasks is an array
             const safeTasks = Array.isArray(tasks) ? tasks : [];
-            
             const runningCount = safeTasks.filter(task => task && task.status === 'running').length;
             const failedCount = safeTasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length;
             
@@ -116,10 +115,10 @@
             // Fetch task log
             const fetchTaskLog = async (task) => {
                 if (!task || !task.node || !task.upid || !clusterId) return;
-                
+
                 setTaskLogLoading(true);
                 setTaskLog('');
-                
+
                 try {
                     const response = await fetch(
                         `${API_URL}/clusters/${clusterId}/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}/log`,
@@ -518,6 +517,7 @@
                         </span>
                         {clusterIcon}
                         <span className="truncate flex-1 font-medium">{cluster.name}</span>
+                        {cluster.cluster_type === 'xcpng' && <span className="text-[9px] px-1 py-0 font-medium rounded" style={{background: 'rgba(34,211,238,0.12)', color: '#22d3ee'}}>XCP - Tech Preview</span>}
                         {cluster.connected === false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
                         {hasOfflineNodes && cluster.connected !== false && <span className="text-[9px] px-1 py-0 font-medium" style={{background: 'rgba(239,192,6,0.15)', color: '#efc006'}}>{offlineNodesCount}&#9888;</span>}
                         <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background: clrStatusDot}} />
@@ -545,7 +545,7 @@
                                 cluster.connected === false ? 'animate-pulse' : hasOfflineNodes ? 'animate-pulse' : cluster.status === 'running' ? 'status-online' : ''
                             }`} />
                             <div className="min-w-0">
-                                <h3 className="font-medium text-sm truncate">{cluster.name}</h3>
+                                <h3 className="font-medium text-sm truncate">{cluster.name}{cluster.cluster_type === 'xcpng' && <span className="ml-1.5 text-[9px] px-1 py-0.5 font-medium rounded bg-cyan-500/10 text-cyan-400">XCP-ng - Tech Preview</span>}</h3>
                                 <p className="text-xs text-gray-500 truncate">{cluster.host}</p>
                             </div>
                         </div>
@@ -615,6 +615,7 @@
             const [topGuests, setTopGuests] = useState([]); // top vms for overview table
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
+            const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
             const [lastUpdate, setLastUpdate] = useState(null);
             const [migrationLogs, setMigrationLogs] = useState([]);
             const [nodeAlerts, setNodeAlerts] = useState({}); // Track node offline/online alerts
@@ -729,15 +730,19 @@
             const [sidebarViewMode, setSidebarViewMode] = useState(() => localStorage.getItem('pegaprox-sidebar-view') || 'tree');
             const [expandedSidebarPools, setExpandedSidebarPools] = useState({});
             const [clusterPools, setClusterPools] = useState([]);
+            const [selectedSidebarDatastore, setSelectedSidebarDatastore] = useState(null); // LW: datastore click in sidebar
+            const [inlinePoolCreate, setInlinePoolCreate] = useState(null);
+            const [inlinePoolEdit, setInlinePoolEdit] = useState(null); // MK: {clusterId, poolid, comment}
 
             // LW: Feb 2026 - clear VM/Node selection on cluster/tab change, auto-expand selected
             // NS: Mar 2026 - don't nuke sidebar selection when cluster changes to match the already-selected item
             useEffect(() => {
                 setSelectedSidebarVm(prev => prev && prev._clusterId === selectedCluster?.id ? prev : null);
                 setSelectedSidebarNode(prev => prev && prev.clusterId === selectedCluster?.id ? prev : null);
+                setSelectedSidebarDatastore(prev => prev && prev.clusterId === selectedCluster?.id ? prev : null);
                 if (selectedCluster && isCorporate) setExpandedSidebarClusters(prev => ({ ...prev, [selectedCluster.id]: true }));
             }, [selectedCluster?.id]);
-            useEffect(() => { if (activeTab !== 'resources') setSelectedSidebarVm(null); if (activeTab !== 'overview') setSelectedSidebarNode(null); }, [activeTab]);
+            useEffect(() => { if (activeTab !== 'resources') setSelectedSidebarVm(null); if (activeTab !== 'overview') setSelectedSidebarNode(null); if (activeTab !== 'datastore') setSelectedSidebarDatastore(null); }, [activeTab]);
             useEffect(() => { localStorage.setItem('pegaprox-sidebar-view', sidebarViewMode); }, [sidebarViewMode]);
 
             // LW: Feb 2026 - keep selectedSidebarVm fresh with latest metrics (preserve _clusterId)
@@ -780,7 +785,7 @@
             const selectedVMwareRef = useRef(null);  // for SSE VMware events
             const vmwareSelectedVmRef = useRef(null);  // for SSE VMware VM detail
             const vmwareSelectedMigrationRef = useRef(null);  // for SSE migration updates
-            
+
             // NS: Keep wsConnectedRef in sync with state for health check
             useEffect(() => {
                 wsConnectedRef.current = wsConnected;
@@ -948,6 +953,7 @@
                 const isSelected = selectedCluster && selectedCluster.id === clusterId;
                 const cMetrics = isSelected ? clusterMetrics : (sidebarClusterData[clusterId]?.metrics || {});
                 const cResources = isSelected ? clusterResources : (sidebarClusterData[clusterId]?.resources || []);
+                const cDatastores = isSelected ? clusterDatastores : (sidebarClusterData[clusterId]?.datastores || { shared: [], local: {} });
 
                 // LW: merge live nodes + offline from knownNodes + nodeAlerts
                 const allNodes = {};
@@ -1013,10 +1019,10 @@
                                     key={`node-${nodeName}`}
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     tabIndex={0}
-                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setActiveTab('overview'); }}
+                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'node', target: {nodeName, clusterId, online: nodeOnline, maintenance: isMaint}, position: {x: e.clientX, y: e.clientY}}); }}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setActiveTab('overview'); }
+                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                     }}
@@ -1045,10 +1051,10 @@
                                 <div
                                     key={`vm-${clusterId}-${vm.vmid}`}
                                     tabIndex={0}
-                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }
+                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                     }}
@@ -1102,7 +1108,7 @@
 
                 if (cPools.length === 0 && allVms.length === 0) return null;
 
-                // LW: keyboard nav, same pattern as node tree
+                // arrow key navigation
                 const treeNavDown = (e) => {
                     e.preventDefault();
                     const all = Array.from(e.currentTarget.closest('.corp-pool-tree').querySelectorAll('[tabindex="0"]'));
@@ -1132,10 +1138,10 @@
                         <div
                             key={`pvm-${clusterId}-${vm.vmid}`}
                             tabIndex={0}
-                            onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                            onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                             onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }
+                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                 else if (e.key === 'ArrowDown') treeNavDown(e);
                                 else if (e.key === 'ArrowUp') treeNavUp(e);
                             }}
@@ -1167,8 +1173,45 @@
                                 .filter(vm => memberVmids.has(String(vm.vmid)))
                                 .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
+                            const isEditing = inlinePoolEdit?.clusterId === clusterId && inlinePoolEdit?.poolid === pool.poolid;
                             return (
                                 <div key={`pool-${pool.poolid}`}>
+                                    {isEditing ? (
+                                        <div className="flex items-center gap-1 pl-0.5 pr-1 py-0.5">
+                                            <Icons.FolderOpen className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#E86F2D'}} />
+                                            <div className="flex-1 flex flex-col gap-0.5">
+                                                <span className="text-[11px] truncate" style={{color: '#728b9a'}}>{pool.poolid}</span>
+                                                <input
+                                                    autoFocus
+                                                    className="bg-[#17242b] border border-[#3a5565] rounded text-[12px] px-1.5 py-0.5 text-white outline-none focus:border-proxmox-orange/50"
+                                                    placeholder={t('comment') || 'Comment...'}
+                                                    value={inlinePoolEdit.comment}
+                                                    onChange={(e) => setInlinePoolEdit(prev => ({...prev, comment: e.target.value}))}
+                                                    onKeyDown={async (e) => {
+                                                        if (e.key === 'Enter') {
+                                                            try {
+                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/pools/${encodeURIComponent(pool.poolid)}`, {
+                                                                    method: 'PUT',
+                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                    body: JSON.stringify({ comment: inlinePoolEdit.comment })
+                                                                });
+                                                                if (res && res.ok) {
+                                                                    addToast(t('poolUpdated') || 'Pool updated', 'success');
+                                                                    setInlinePoolEdit(null);
+                                                                    setTimeout(() => { fetchClusterPools(clusterId); fetchSidebarClusterData(clusterId); }, 300);
+                                                                } else {
+                                                                    const err = await res?.json().catch(() => ({}));
+                                                                    addToast(err?.error || 'Failed', 'error');
+                                                                }
+                                                            } catch { addToast('Failed', 'error'); }
+                                                        }
+                                                        if (e.key === 'Escape') setInlinePoolEdit(null);
+                                                    }}
+                                                    onBlur={() => setInlinePoolEdit(null)}
+                                                />
+                                            </div>
+                                        </div>
+                                    ) : (
                                     <div
                                         tabIndex={0}
                                         className="flex items-center gap-1 pl-0.5 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
@@ -1185,8 +1228,10 @@
                                             : <Icons.Folder className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#E86F2D'}} />
                                         }
                                         <span className="truncate flex-1">{pool.poolid}</span>
-                                        <span className="text-[11px] ml-auto" style={{color: '#728b9a'}}>{poolVms.length === 0 ? (t('emptyPool') || 'Empty') : poolVms.length}</span>
+                                        {pool.comment && <span className="text-[10px] truncate max-w-[60px]" style={{color: '#5a7a8a'}} title={pool.comment}>{pool.comment}</span>}
+                                        <span className="text-[11px] ml-auto flex-shrink-0" style={{color: '#728b9a'}}>{poolVms.length === 0 ? (t('emptyPool') || 'Empty') : poolVms.length}</span>
                                     </div>
+                                    )}
                                     {isExpanded && (
                                         <div className="ml-4">
                                             {poolVms.length === 0 ? (
@@ -1197,7 +1242,7 @@
                                 </div>
                             );
                         })}
-                        {/* MK: unassigned VMs that aren't in any pool */}
+                        {/* unassigned / ungrouped */}
                         {unassignedVms.length > 0 && (
                             <div>
                                 <div
@@ -1222,11 +1267,157 @@
                             </div>
                         )}
                         {/* edge case: no pools and no VMs at all */}
-                        {cPools.length === 0 && unassignedVms.length > 0 && (
+                        {cPools.length === 0 && unassignedVms.length === 0 && (
                             <div className="pl-2 py-1 text-[12px]" style={{color: '#728b9a', fontStyle: 'italic'}}>
                                 {t('noPools') || 'No pools configured'}
                             </div>
                         )}
+                        {/* inline create */}
+                        {inlinePoolCreate?.clusterId === clusterId ? (
+                            <div className="flex items-center gap-1 pl-0.5 pr-1 py-0.5">
+                                <Icons.FolderPlus className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#E86F2D'}} />
+                                <input
+                                    autoFocus
+                                    className="flex-1 bg-[#17242b] border border-[#3a5565] rounded text-[12px] px-1.5 py-0.5 text-white outline-none focus:border-proxmox-orange/50"
+                                    placeholder={t('poolName') || 'Pool name...'}
+                                    value={inlinePoolCreate.name}
+                                    onChange={(e) => setInlinePoolCreate(prev => ({...prev, name: e.target.value}))}
+                                    onKeyDown={async (e) => {
+                                        if (e.key === 'Enter' && inlinePoolCreate.name.trim()) {
+                                            try {
+                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/pools`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ poolid: inlinePoolCreate.name.trim() })
+                                                });
+                                                if (res && res.ok) {
+                                                    addToast(t('poolCreated') || 'Pool created', 'success');
+                                                    setInlinePoolCreate(null);
+                                                    setTimeout(() => { fetchClusterPools(clusterId); fetchSidebarClusterData(clusterId); }, 300);
+                                                } else {
+                                                    const err = await res?.json().catch(() => ({}));
+                                                    addToast(err?.error || 'Failed', 'error');
+                                                }
+                                            } catch { addToast('Failed', 'error'); }
+                                        }
+                                        if (e.key === 'Escape') setInlinePoolCreate(null);
+                                    }}
+                                    onBlur={() => { if (!inlinePoolCreate.name.trim()) setInlinePoolCreate(null); }}
+                                />
+                            </div>
+                        ) : isAdmin && (
+                            <div
+                                className="flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[12px] cursor-pointer mt-0.5"
+                                style={{color: '#5a7a8a'}}
+                                onClick={() => setInlinePoolCreate({ clusterId, name: '' })}
+                                onMouseEnter={(e) => { e.currentTarget.style.color = '#adbbc4'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.color = '#5a7a8a'; }}
+                            >
+                                <Icons.Plus className="w-3 h-3" />
+                                <span>{t('createPool') || 'Create Pool'}</span>
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+            // LW: datastore inventory view, separate from the host tree
+            const renderDatastoreTree = (clusterId) => {
+                if (!isCorporate || !expandedSidebarClusters[clusterId]) return null;
+
+                const isSelected = selectedCluster && selectedCluster.id === clusterId;
+                const cDatastores = isSelected ? clusterDatastores : (sidebarClusterData[clusterId]?.datastores || { shared: [], local: {} });
+
+                if (loadingSidebarClusters[clusterId]) {
+                    return (
+                        <div className="ml-5 py-2 flex items-center gap-2 text-[12px]" style={{color: '#728b9a'}}>
+                            <Icons.Loader className="w-3.5 h-3.5 animate-spin" />
+                            <span>{t('loading')}...</span>
+                        </div>
+                    );
+                }
+
+                const sharedStores = (cDatastores.shared || []).sort((a, b) => (a.storage || '').localeCompare(b.storage || ''));
+                const localByNode = Object.entries(cDatastores.local || {}).sort(([a], [b]) => a.localeCompare(b));
+                const sharedNames = new Set(sharedStores.map(s => s.storage)); // avoid dupes under node sections
+
+                if (sharedStores.length === 0 && localByNode.length === 0) {
+                    return (
+                        <div className="ml-5 py-1 text-[12px]" style={{color: '#728b9a', fontStyle: 'italic'}}>
+                            {t('noDatastores') || 'No datastores'}
+                        </div>
+                    );
+                }
+
+                const renderStoreItem = (store, node) => {
+                    const isStoreSelected = selectedSidebarDatastore?.name === store.storage && selectedSidebarDatastore?.clusterId === clusterId;
+                    const isActive = store.active !== 0 && store.enabled !== 0;
+                    const pct = store.total > 0 ? Math.round((store.used / store.total) * 100) : 0;
+                    const barColor = pct > 85 ? '#f54f47' : pct > 70 ? '#efc006' : '#49afd9';
+                    return (
+                        <div
+                            key={`ds-${clusterId}-${store.storage}-${node || 's'}`}
+                            tabIndex={0}
+                            onClick={() => {
+                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
+                                setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                                setActiveTab('datastore');
+                            }}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarNode(null); setActiveTab('datastore'); }
+                            }}
+                            className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
+                            style={isStoreSelected ? {background: '#324f61', color: '#e9ecef'} : {color: isActive ? '#adbbc4' : '#728b9a'}}
+                            onMouseEnter={(e) => { if (!isStoreSelected) { e.currentTarget.style.background = '#29414e'; e.currentTarget.style.color = '#e9ecef'; }}}
+                            onMouseLeave={(e) => { if (!isStoreSelected) { e.currentTarget.style.background = ''; e.currentTarget.style.color = isActive ? '#adbbc4' : '#728b9a'; }}}
+                        >
+                            <Icons.Database className="w-3.5 h-3.5 flex-shrink-0" style={{color: isActive ? '#e5a00d' : '#728b9a'}} />
+                            <span className="truncate flex-1" style={{opacity: isActive ? 1 : 0.5}}>{store.storage}</span>
+                            {isActive && store.total > 0 && (
+                                <span className="flex items-center gap-1 ml-auto flex-shrink-0">
+                                    <span className="w-12 h-1 rounded-full overflow-hidden" style={{background: '#1a2e38'}}>
+                                        <span className="block h-full rounded-full" style={{width: `${pct}%`, background: barColor}} />
+                                    </span>
+                                    <span className="text-[10px]" style={{color: '#728b9a'}}>{pct}%</span>
+                                </span>
+                            )}
+                        </div>
+                    );
+                };
+
+                return (
+                    <div className="ml-5 corp-inline-tree">
+                        {/* shared first, then per-node */}
+                        {sharedStores.length > 0 && (
+                            <>
+                                <div className="flex items-center gap-1.5 pl-1 py-0.5 text-[11px] uppercase tracking-wider" style={{color: '#5a7a8a'}}>
+                                    <Icons.Globe className="w-3 h-3 flex-shrink-0" />
+                                    <span>{t('shared') || 'Shared'}</span>
+                                </div>
+                                <div className="ml-2">
+                                    {sharedStores.map(s => renderStoreItem(s, null))}
+                                </div>
+                            </>
+                        )}
+                        {/* node-local */}
+                        {localByNode.map(([nodeName, stores]) => {
+                            const nodeStores = stores
+                                .filter(s => !sharedNames.has(s.storage))
+                                .sort((a, b) => (a.storage || '').localeCompare(b.storage || ''));
+                            if (nodeStores.length === 0) return null;
+                            return (
+                                <React.Fragment key={`dsn-${clusterId}-${nodeName}`}>
+                                    <div className="flex items-center gap-1.5 pl-1 py-0.5 mt-0.5 text-[11px] uppercase tracking-wider" style={{color: '#5a7a8a'}}>
+                                        <Icons.Server className="w-3 h-3 flex-shrink-0" />
+                                        <span>{nodeName}</span>
+                                    </div>
+                                    <div className="ml-2">
+                                        {nodeStores.map(s => renderStoreItem(s, nodeName))}
+                                    </div>
+                                </React.Fragment>
+                            );
+                        })}
                     </div>
                 );
             };
@@ -1950,7 +2141,7 @@
                     }
                     // Add new task and sort by starttime
                     return [task, ...prev]
-                        .sort((a, b) => (b.starttime || 0) - (a.starttime || 0))
+                        .sort((a, b) => (b.starttime || 0) - (a.starttime || 0) || (a.upid || '').localeCompare(b.upid || ''))
                         .slice(0, 50);
                 });
             };
@@ -1963,7 +2154,7 @@
             // Cancel a running task
             const cancelTask = async (task) => {
                 if (!selectedCluster || !task || !task.upid || !task.node) return;
-                
+
                 try {
                     const response = await authFetch(
                         `${API_URL}/clusters/${selectedCluster.id}/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}`,
@@ -1994,7 +2185,7 @@
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/tasks`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        
+
                         if (Array.isArray(data)) {
                             // NS: On initial fetch, always accept response (no stale check)
                             // SSE events during fetch would otherwise cause "stale" rejection
@@ -2002,33 +2193,28 @@
                                 console.log('Skipping stale task fetch response');
                                 return;
                             }
-                            
-                            // Mark initial fetch as done
+
                             if (isInitialFetch) {
                                 initialTaskFetchPending.current = false;
                             }
-                            
+
                             taskUpdateTimestamp.current = Date.now();
-                            
+
                             setTasks(prev => {
-                                // If no new data, keep existing
                                 if (data.length === 0) return prev;
-                                
+
                                 const taskMap = new Map();
-                                // Add existing tasks
                                 prev.forEach(task => {
                                     if (task && task.upid) taskMap.set(task.upid, task);
                                 });
-                                // Add/update new tasks
                                 data.forEach(task => {
                                     if (task && task.upid) {
                                         const existing = taskMap.get(task.upid);
                                         taskMap.set(task.upid, existing ? { ...existing, ...task } : task);
                                     }
                                 });
-                                // Convert back to array, sort by starttime desc, limit to 50
                                 return Array.from(taskMap.values())
-                                    .sort((a, b) => (b.starttime || 0) - (a.starttime || 0))
+                                    .sort((a, b) => (b.starttime || 0) - (a.starttime || 0) || (a.upid || '').localeCompare(b.upid || ''))
                                     .slice(0, 50);
                             });
                         }
@@ -2042,18 +2228,16 @@
             useEffect(() => {
                 if (selectedCluster) {
                     console.log('Cluster changed, fetching tasks for:', selectedCluster.id);
-                    // NS: Reset flags for new cluster - allows initial fetch to bypass stale check
                     taskUpdateTimestamp.current = 0;
                     initialTaskFetchPending.current = true;
-                    setTasks([]);  // Clear old tasks immediately
+                    setTasks([]);
                     fetchTasks(selectedCluster.id);
                     fetchHAStatus(selectedCluster.id);
-                    
-                    // Poll HA status every 30 seconds to detect offline nodes
+
                     const haInterval = setInterval(() => {
                         fetchHAStatus(selectedCluster.id);
                     }, 30000);
-                    
+
                     return () => clearInterval(haInterval);
                 } else {
                     setTasks([]);
@@ -2158,42 +2342,33 @@
                                         taskUpdateTimestamp.current = Date.now();
                                         setTasks(prev => {
                                             const taskMap = new Map();
-                                            // Add existing tasks first
                                             prev.forEach(task => {
                                                 if (task && task.upid) taskMap.set(task.upid, task);
                                             });
-                                            // SSE data is authoritative - update/add all
                                             data.data.forEach(task => {
                                                 if (task && task.upid) {
                                                     taskMap.set(task.upid, task);
                                                 }
                                             });
-                                            // Sort by starttime desc, limit to 50
                                             return Array.from(taskMap.values())
-                                                .sort((a, b) => (b.starttime || 0) - (a.starttime || 0))
+                                                .sort((a, b) => (b.starttime || 0) - (a.starttime || 0) || (a.upid || '').localeCompare(b.upid || ''))
                                                 .slice(0, 50);
                                         });
                                     }
                                 } else if (!currentCluster) {
                                     // MK: Feb 2026 - Fixed oscillation bug in "Alle Cluster" view
-                                    // Old logic: replace cluster tasks + global slice(50) = constant flickering
-                                    // because each cluster's update would cut the other cluster's tasks
-                                    // New logic: Map-based merge with per-cluster fair-share limit
                                     if (Array.isArray(data.data)) {
                                         setTasks(prev => {
+                                            if (data.data.length === 0) return prev;
                                             const taskMap = new Map();
-                                            // Keep existing tasks from ALL clusters
                                             prev.forEach(task => {
                                                 if (task && task.upid) taskMap.set(task.upid, task);
                                             });
-                                            // Update/add tasks from this cluster
                                             data.data.forEach(task => {
                                                 if (task && task.upid) {
                                                     taskMap.set(task.upid, {...task, cluster_id: data.cluster_id});
                                                 }
                                             });
-                                            // Remove tasks from this cluster that are no longer reported
-                                            // (task completed and fell off the Proxmox task list)
                                             const reportedUpids = new Set(data.data.map(t => t.upid).filter(Boolean));
                                             for (const [upid, task] of taskMap) {
                                                 if (task.cluster_id === data.cluster_id && !reportedUpids.has(upid)) {
@@ -2201,10 +2376,9 @@
                                                 }
                                             }
                                             const sorted = Array.from(taskMap.values())
-                                                .sort((a, b) => (b.starttime || 0) - (a.starttime || 0))
+                                                .sort((a, b) => (b.starttime || 0) - (a.starttime || 0) || (a.upid || '').localeCompare(b.upid || ''))
                                                 .slice(0, 100);
-                                            // Skip re-render if nothing actually changed
-                                            if (sorted.length === prev.length && 
+                                            if (sorted.length === prev.length &&
                                                 sorted.every((t, i) => prev[i]?.upid === t.upid && prev[i]?.status === t.status)) {
                                                 return prev;
                                             }
@@ -2219,12 +2393,12 @@
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
                                     setClusterMetrics(data.data);
                                     setLastUpdate(new Date());
-                                    
+
                                     // NS: Track all nodes - nodes in metrics are online
                                     setKnownNodes(prev => {
                                         const updated = { ...prev };
                                         const now = new Date().toISOString();
-                                        
+
                                         // Mark all nodes in metrics as online
                                         Object.keys(data.data || {}).forEach(nodeName => {
                                             updated[nodeName] = {
@@ -2233,20 +2407,32 @@
                                                 metrics: data.data[nodeName]
                                             };
                                         });
-                                        
+
                                         // DON'T mark nodes as offline based on metrics
                                         // Let the node_status SSE event handle offline detection
-                                        
+
                                         return updated;
                                     });
                                 }
+                                // keep sidebar metrics fresh for other expanded clusters
+                                if (data.cluster_id && (!currentCluster || data.cluster_id !== currentCluster.id)) {
+                                    setSidebarClusterData(prev => {
+                                        if (!prev[data.cluster_id]) return prev;
+                                        return { ...prev, [data.cluster_id]: { ...prev[data.cluster_id], metrics: data.data } };
+                                    });
+                                }
                             } else if (data.type === 'resources') {
-                                // NS: ONLY process resources for the currently selected cluster
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
                                     setClusterResources(data.data);
-                                    // MK: Store in window for access from ConfigModal reassign feature
                                     window.pegaproxVmList = data.data;
                                     setLastUpdate(new Date());
+                                }
+                                // LW: also update sidebar tree for non-selected clusters
+                                if (data.cluster_id && (!currentCluster || data.cluster_id !== currentCluster.id)) {
+                                    setSidebarClusterData(prev => {
+                                        if (!prev[data.cluster_id]) return prev;
+                                        return { ...prev, [data.cluster_id]: { ...prev[data.cluster_id], resources: data.data } };
+                                    });
                                 }
                             } else if (data.type === 'vm_config') {
                                 // NS: Live VM config updates - dispatch event for modals to listen
@@ -2269,29 +2455,30 @@
                                 const currentUser = user?.username;
                                 
                                 // NS: Optimistic UI update - immediately update VM status in the list
-                                if (currentCluster && data.cluster_id === currentCluster.id && action.resource_id) {
-                                    const vmid = parseInt(action.resource_id);
-                                    const newStatus = {
-                                        'start': 'running',
-                                        'stop': 'stopped',
-                                        'shutdown': 'stopped',
-                                        'reboot': 'running',
-                                        'delete': null  // Will be removed
-                                    }[action.action];
-                                    
-                                    if (newStatus !== undefined) {
-                                        setClusterResources(prev => {
-                                            if (!prev) return prev;
-                                            if (newStatus === null) {
-                                                // Delete - remove from list
-                                                return prev.filter(r => r.vmid !== vmid);
-                                            }
-                                            // Update status
-                                            return prev.map(r => 
-                                                r.vmid === vmid ? { ...r, status: newStatus } : r
-                                            );
-                                        });
-                                    }
+                                const vmid = action.resource_id ? parseInt(action.resource_id) : null;
+                                const newStatus = vmid ? {
+                                    'start': 'running', 'stop': 'stopped',
+                                    'shutdown': 'stopped', 'reboot': 'running',
+                                    'delete': null
+                                }[action.action] : undefined;
+
+                                if (currentCluster && data.cluster_id === currentCluster.id && newStatus !== undefined) {
+                                    setClusterResources(prev => {
+                                        if (!prev) return prev;
+                                        if (newStatus === null) return prev.filter(r => r.vmid !== vmid);
+                                        return prev.map(r => r.vmid === vmid ? { ...r, status: newStatus } : r);
+                                    });
+                                }
+                                // also update sidebar for other clusters
+                                if (data.cluster_id && (!currentCluster || data.cluster_id !== currentCluster.id) && newStatus !== undefined) {
+                                    setSidebarClusterData(prev => {
+                                        const cd = prev[data.cluster_id];
+                                        if (!cd || !cd.resources) return prev;
+                                        const updated = newStatus === null
+                                            ? cd.resources.filter(r => r.vmid !== vmid)
+                                            : cd.resources.map(r => r.vmid === vmid ? { ...r, status: newStatus } : r);
+                                        return { ...prev, [data.cluster_id]: { ...cd, resources: updated } };
+                                    });
                                 }
                                 
                                 // Show toast for other users' actions
@@ -2463,7 +2650,7 @@
                 const interval = setInterval(fetchClusters, 30000);
                 return () => clearInterval(interval);
             }, []);
-            
+
             // LW: Feb 2026 - PBS fetch functions
             const fetchPBSServers = async () => {
                 try {
@@ -3400,6 +3587,7 @@
                 setNodeAlerts({}); // Also clear node alerts
                 setGlobalSnapshots([]);
                 setClusterPools([]);  // NS: clear pools on cluster switch
+                setClusterDatastores({ shared: [], local: {} });
                 setResourcesSubTab('management');
                 setSnapshotFilterDate('');
                 setSnapshotSortBy('age');
@@ -3410,6 +3598,7 @@
                     fetchClusterMetrics(selectedCluster.id);
                     fetchClusterResources(selectedCluster.id);
                     fetchClusterPools(selectedCluster.id);
+                    fetchClusterDatastores(selectedCluster.id);
                     fetchMigrationLogs(selectedCluster.id);
                     fetchTasks(selectedCluster.id);
 
@@ -3615,15 +3804,17 @@
                 // NS: Mar 2026 - track loading so we can show a spinner in the tree
                 setLoadingSidebarClusters(prev => ({...prev, [clusterId]: true}));
                 try {
-                    const [metricsRes, resourcesRes, poolsRes] = await Promise.all([
+                    const [metricsRes, resourcesRes, poolsRes, datastoresRes] = await Promise.all([
                         authFetch(`${API_URL}/clusters/${clusterId}/metrics`),
                         authFetch(`${API_URL}/clusters/${clusterId}/resources`),
-                        authFetch(`${API_URL}/clusters/${clusterId}/pools`)
+                        authFetch(`${API_URL}/clusters/${clusterId}/pools`),
+                        authFetch(`${API_URL}/clusters/${clusterId}/datastores`)
                     ]);
                     const metrics = metricsRes && metricsRes.ok ? await metricsRes.json() : {};
                     const resources = resourcesRes && resourcesRes.ok ? await resourcesRes.json() : [];
                     const pools = poolsRes && poolsRes.ok ? await poolsRes.json() : [];
-                    setSidebarClusterData(prev => ({ ...prev, [clusterId]: { metrics, resources, pools } }));
+                    const datastores = datastoresRes && datastoresRes.ok ? await datastoresRes.json() : { shared: [], local: {} };
+                    setSidebarClusterData(prev => ({ ...prev, [clusterId]: { metrics, resources, pools, datastores } }));
                 } catch (e) { console.error('sidebar fetch:', e); }
                 finally { setLoadingSidebarClusters(prev => { const n = {...prev}; delete n[clusterId]; return n; }); }
             };
@@ -3634,6 +3825,13 @@
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/pools`);
                     if (res && res.ok) setClusterPools(await res.json());
                 } catch (e) { /* pools are optional, dont crash */ }
+            };
+
+            const fetchClusterDatastores = async (clusterId) => {
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/datastores`);
+                    if (res && res.ok) setClusterDatastores(await res.json());
+                } catch (e) { /* not critical for sidebar */ }
             };
 
             // LW: Feb 2026 - toggle sidebar cluster expansion
@@ -4204,6 +4402,7 @@
                         { label: t('newVm') || 'New VM', icon: <Icons.Monitor className="w-3.5 h-3.5" />, onClick: () => { setSelectedCluster(cluster); setShowCreateVm('qemu'); } },
                         { label: t('newContainer') || 'New Container', icon: <Icons.Box className="w-3.5 h-3.5" />, onClick: () => { setSelectedCluster(cluster); setShowCreateVm('lxc'); } },
                         { separator: true },
+                        { label: t('assignToGroup') || 'Assign to Group', icon: <Icons.FolderPlus className="w-3.5 h-3.5" />, onClick: () => setShowAssignGroup(cluster) },
                         { label: t('bulkMigration') || 'Bulk Migration', icon: <Icons.ArrowRight className="w-3.5 h-3.5" />, onClick: () => { setSelectedCluster(cluster); setActiveTab('resources'); setResourcesSubTab('management'); } },
                         { separator: true },
                         { label: t('refreshData') || 'Refresh', icon: <Icons.RefreshCw className="w-3.5 h-3.5" />, onClick: () => { fetchSidebarClusterData(cluster.id); if (selectedCluster?.id === cluster.id) { fetchClusterMetrics(cluster.id); fetchClusterResources(cluster.id); } } },
@@ -4240,14 +4439,12 @@
                     ];
                 }
 
-                // NS: Mar 2026 - pool context menu for pool/folder view
+                // pool right-click
                 if (type === 'pool') {
                     const { poolid, clusterId, comment } = target;
                     return [
-                        { label: t('editPool') || 'Edit Pool', icon: <Icons.Settings className="w-3.5 h-3.5" />, onClick: () => {
-                            const c = clusters.find(cl => cl.id === clusterId);
-                            if (c && (!selectedCluster || selectedCluster.id !== clusterId)) setSelectedCluster(c);
-                            setActiveTab('settings'); // navigate to security/pools tab
+                        { label: t('editPool') || 'Edit Pool', icon: <Icons.Edit className="w-3.5 h-3.5" />, onClick: () => {
+                            setInlinePoolEdit({ clusterId, poolid, comment: comment || '' });
                         }},
                         { separator: true },
                         { label: t('refreshData') || 'Refresh', icon: <Icons.RefreshCw className="w-3.5 h-3.5" />, onClick: () => { fetchSidebarClusterData(clusterId); fetchClusterPools(clusterId); } },
@@ -4307,6 +4504,56 @@
                     // cross-cluster only if multiple clusters
                     if (clusters.length > 1) {
                         items.push({ label: t('crossClusterMigrate') || 'Cross-Cluster', icon: <Icons.Globe className="w-3.5 h-3.5" />, onClick: () => { selectAndNav(); } });
+                    }
+
+                    // MK: pool assignment submenu
+                    const poolsForCluster = (selectedCluster?.id === cId ? clusterPools : sidebarClusterData[cId]?.pools) || [];
+                    if (poolsForCluster.length > 0) {
+                        const poolSubmenu = [
+                            ...poolsForCluster.map(p => ({
+                                label: p.poolid,
+                                icon: <Icons.Folder className="w-3.5 h-3.5" style={{color: '#E86F2D'}} />,
+                                onClick: async () => {
+                                    try {
+                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}`, {
+                                            method: 'PUT',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ add_members: [vm.vmid] })
+                                        });
+                                        if (res && res.ok) {
+                                            addToast(`${vm.name || vm.vmid} → ${p.poolid}`, 'success');
+                                            fetchClusterPools(cId);
+                                            fetchSidebarClusterData(cId);
+                                        } else {
+                                            const err = await res?.json().catch(() => ({}));
+                                            addToast(err?.error || 'Failed', 'error');
+                                        }
+                                    } catch { addToast(t('connectionError'), 'error'); }
+                                }
+                            })),
+                            { separator: true },
+                            { label: t('removeFromPool') || 'Remove from Pool', icon: <Icons.XCircle className="w-3.5 h-3.5" />, danger: true, onClick: async () => {
+                                // find which pool this VM is in
+                                const currentPool = poolsForCluster.find(p => (p.members || []).some(m => String(m.vmid || m.id) === String(vm.vmid)));
+                                if (!currentPool) { addToast('VM is not in a pool', 'info'); return; }
+                                try {
+                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ remove_members: [vm.vmid] })
+                                    });
+                                    if (res && res.ok) {
+                                        addToast(`${vm.name || vm.vmid} removed from ${currentPool.poolid}`, 'success');
+                                        fetchClusterPools(cId);
+                                        fetchSidebarClusterData(cId);
+                                    } else {
+                                        const err = await res?.json().catch(() => ({}));
+                                        addToast(err?.error || 'Failed', 'error');
+                                    }
+                                } catch { addToast(t('connectionError'), 'error'); }
+                            }}
+                        ];
+                        items.push({ label: t('assignToPool') || 'Assign to Pool', icon: <Icons.FolderPlus className="w-3.5 h-3.5" />, submenu: poolSubmenu });
                     }
 
                     items.push(
@@ -4396,13 +4643,16 @@
                                             <><Icons.ChevronRight className="w-3 h-3 text-gray-600" /><span className="text-gray-200">{selectedCluster.name}</span></>
                                         )}
                                         {activeTab && selectedCluster && (
-                                            <><Icons.ChevronRight className="w-3 h-3 text-gray-600" /><span className={(selectedSidebarVm || selectedSidebarNode) ? 'hover:text-white cursor-pointer' : 'text-gray-300'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); }}>{t(activeTab)}</span></>
+                                            <><Icons.ChevronRight className="w-3 h-3 text-gray-600" /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore) ? 'hover:text-white cursor-pointer' : 'text-gray-300'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); }}>{t(activeTab)}</span></>
                                         )}
                                         {selectedSidebarVm && activeTab === 'resources' && (
                                             <><Icons.ChevronRight className="w-3 h-3 text-gray-600" /><span className="text-gray-200">{selectedSidebarVm.name || `VM ${selectedSidebarVm.vmid}`}</span></>
                                         )}
                                         {selectedSidebarNode && activeTab === 'overview' && (
                                             <><Icons.ChevronRight className="w-3 h-3 text-gray-600" /><span className="text-gray-200">{selectedSidebarNode.name}</span></>
+                                        )}
+                                        {selectedSidebarDatastore && activeTab === 'datastore' && (
+                                            <><Icons.ChevronRight className="w-3 h-3 text-gray-600" /><span className="text-gray-200">{selectedSidebarDatastore.name}</span></>
                                         )}
                                     </div>
                                 )}
@@ -4623,6 +4873,7 @@
                                                     <div className="absolute right-0 top-full mt-2 w-64 bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl z-50 overflow-hidden animate-scale-in">
                                                         {[
                                                             { id: 'proxmox', label: 'Proxmox VE', desc: t('pveClusterDesc') || 'Virtual machines & containers', icon: Icons.Server, color: 'text-orange-400', bg: 'bg-orange-500/10' },
+                                                            { id: 'xcpng', label: 'XCP-ng (Tech Preview)', desc: t('xcpngDesc') || 'XCP-ng / Xen pool management', icon: Icons.Cpu, color: 'text-cyan-400', bg: 'bg-cyan-500/10' },
                                                             { id: 'pbs', label: 'Proxmox Backup Server', desc: t('pbsDesc') || 'Backup management', icon: Icons.Shield, color: 'text-blue-400', bg: 'bg-blue-500/10' },
                                                             { id: 'vmware', label: 'ESXi', desc: t('vmwareDesc') || 'ESXi infrastructure', icon: Icons.Cloud, color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
                                                         ].map(item => (
@@ -4761,33 +5012,46 @@
                             {/* LW: Feb 2026 - sidebar, resizable in corporate */}
                             <div className={`${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}`} style={isCorporate ? {width: sidebarWidth + 'px'} : undefined}>
                                 <div className={`sticky top-6 ${isCorporate ? 'space-y-0.5 px-1 py-2' : 'space-y-3 pr-1'} pb-4`} style={{ maxHeight: 'calc(100vh - 3rem)', overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: '#4a4a4a transparent' }}>
+                                    {/* LW: view switcher (tree/pools/datastores) */}
+                                    {isCorporate && (
+                                        <div className="flex items-center justify-center gap-1 px-1 pb-1.5 mb-1" style={{borderBottom: '1px solid #1e3340'}}>
+                                            {[
+                                                { id: 'tree', icon: Icons.Server, label: t('treeView') || 'Hosts & VMs' },
+                                                { id: 'pools', icon: Icons.Folder, label: t('poolView') || 'Pools' },
+                                                { id: 'datastores', icon: Icons.Database, label: t('datastoreView') || 'Datastores' },
+                                            ].map(view => {
+                                                const isActive = sidebarViewMode === view.id;
+                                                return (
+                                                    <button
+                                                        key={view.id}
+                                                        onClick={() => setSidebarViewMode(view.id)}
+                                                        className="flex flex-col items-center gap-0.5 px-2.5 py-1 rounded transition-colors"
+                                                        style={isActive ? {background: '#324f61', color: '#e9ecef'} : {color: '#5a7a8a'}}
+                                                        onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = '#adbbc4'; }}
+                                                        onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = '#5a7a8a'; }}
+                                                        title={view.label}
+                                                    >
+                                                        <view.icon className="w-4 h-4" />
+                                                        <span className="text-[10px] leading-none">{view.label}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                     {/* LW: Feb 2026 - group management header, compact in corporate */}
                                     <div className="flex items-center justify-between px-1">
                                         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('clusters')}</h2>
                                         <div className="flex items-center gap-1">
-                                            {/* NS: Mar 2026 - tree/pool view toggle, corporate only */}
-                                            {isCorporate && (
-                                                <div className="flex rounded" style={{border: '1px solid #3a5565'}}>
-                                                    <button
-                                                        onClick={() => setSidebarViewMode('tree')}
-                                                        className="p-0.5 transition-colors"
-                                                        style={sidebarViewMode === 'tree' ? {background: '#324f61', color: '#e9ecef'} : {color: '#728b9a'}}
-                                                        title={t('treeView') || 'Tree View'}
-                                                    >
-                                                        <Icons.Server className="w-3 h-3" />
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setSidebarViewMode('pools')}
-                                                        className="p-0.5 transition-colors"
-                                                        style={sidebarViewMode === 'pools' ? {background: '#324f61', color: '#e9ecef'} : {color: '#728b9a'}}
-                                                        title={t('poolView') || 'Pool View'}
-                                                    >
-                                                        <Icons.Folder className="w-3 h-3" />
-                                                    </button>
-                                                </div>
-                                            )}
                                             {isAdmin && (
                                                 isCorporate ? (
+                                                    <>
+                                                    <button
+                                                        onClick={() => setShowGroupManager(true)}
+                                                        className="p-0.5 text-gray-600 hover:text-gray-300 transition-colors"
+                                                        title={t('manageGroups') || 'Manage Groups'}
+                                                    >
+                                                        <Icons.FolderPlus className="w-3 h-3" />
+                                                    </button>
                                                     <button
                                                         onClick={() => { setAddClusterType('proxmox'); setShowAddModal(true); }}
                                                         className="p-0.5 text-gray-600 hover:text-gray-300 transition-colors"
@@ -4795,6 +5059,7 @@
                                                     >
                                                         <Icons.Plus className="w-3 h-3" />
                                                     </button>
+                                                    </>
                                                 ) : (
                                                     <button
                                                         onClick={() => setShowGroupManager(true)}
@@ -4916,7 +5181,8 @@
                                                                             toggleSidebarCluster={toggleSidebarCluster}
                                                                             onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                         />
-                                                                        {sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : renderInlineNodeTree(cluster.id)}
+                                                                        {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : renderInlineNodeTree(cluster.id)}
+                                                                        {expandedSidebarClusters[cluster.id] && <div className="h-px my-0.5" style={{background: '#1e3340', marginLeft: '20px'}} />}
                                                                     </React.Fragment>
                                                                 ))}
                                                             </div>
@@ -4959,7 +5225,8 @@
                                                                     toggleSidebarCluster={toggleSidebarCluster}
                                                                     onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                 />
-                                                                {sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : renderInlineNodeTree(cluster.id)}
+                                                                {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : renderInlineNodeTree(cluster.id)}
+                                                                        {expandedSidebarClusters[cluster.id] && <div className="h-px my-0.5" style={{background: '#1e3340', marginLeft: '20px'}} />}
                                                             </React.Fragment>
                                                         ))}
                                                     </div>
@@ -5712,7 +5979,7 @@
 
                                         {/* Datastore Tab */}
                                         {activeTab === 'datastore' && (
-                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} />
+                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} />
                                         )}
 
                                         {/* Automation Tab - NS Jan 2026 - Combines Schedules, Tags, Alerts, Affinity, Scripts */}
@@ -8277,13 +8544,16 @@
                                                                             </div>
                                                                         </div>
                                                                         
+                                                                        <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 mb-4">
+                                                                            <div className="text-xs text-amber-400 font-semibold mb-1">⚠ Prerequisite</div>
+                                                                            <div className="text-xs text-amber-400/70">The VM must be powered off on the ESXi host before starting the migration. Running VMs cannot be migrated — disk files are locked while the VM is active.</div>
+                                                                        </div>
                                                                         <div className="space-y-2 mb-4 text-xs text-gray-500">
                                                                             <div className="font-semibold text-gray-400 mb-1">How it works:</div>
-                                                                            <div>1. Pre-sync: Full disk copy via HTTPS while VM runs (no downtime)</div>
-                                                                            <div>2. Pre-compute: Proxmox block checksums while VM still runs</div>
-                                                                            <div>3. Stop VM: Brief downtime starts, VMDKs unlock</div>
-                                                                            <div>4. Delta sync: Only changed blocks transferred via SSH (fast!)</div>
-                                                                            <div>5. Start on Proxmox: VM boots, downtime ends</div>
+                                                                            <div>1. Full disk copy via HTTPS from ESXi datastore</div>
+                                                                            <div>2. Convert VMDK to Proxmox format (qcow2/raw)</div>
+                                                                            <div>3. Import VM config (CPU, RAM, network)</div>
+                                                                            <div>4. Start VM on Proxmox</div>
                                                                         </div>
                                                                         
                                                                         <button onClick={() => fetchMigrationPlan(vmwareSelectedVm)} disabled={vmwareMigrateLoading} className="w-full py-2.5 rounded-lg bg-emerald-500 text-white font-medium hover:bg-emerald-600 disabled:opacity-50 text-sm">
@@ -9386,6 +9656,11 @@
                                         <div className="text-xs text-blue-400 font-semibold mb-1">Requirements</div>
                                         <div className="text-xs text-blue-400/70">- SSH must be enabled on the ESXi host</div>
                                         <div className="text-xs text-blue-400/70">- ESXi root credentials are required for VM migration</div>
+                                        <div className="text-xs text-blue-400/70">- VMs must be powered off on ESXi before migration</div>
+                                    </div>
+                                    <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+                                        <div className="text-xs text-amber-400 font-semibold mb-1">⚠ Important</div>
+                                        <div className="text-xs text-amber-400/70">VMs must be shut down on the ESXi host before migration. Running VMs cannot be migrated and Near-Zero Downtime Migration requires exclusive disk access.</div>
                                     </div>
 
                                     {vmwareTestResult && (

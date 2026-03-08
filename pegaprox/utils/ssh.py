@@ -130,8 +130,16 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
         import paramiko
         
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.WarningPolicy())
-        
+        # MK: Mar 2026 - TOFU: trust on first use, reject if key changes
+        _known_hosts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    'config', '.ssh_known_hosts')
+        try:
+            if os.path.exists(_known_hosts):
+                client.load_host_keys(_known_hosts)
+        except Exception:
+            pass
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
         connected = False
         transport = None
         
@@ -161,7 +169,12 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
         if not connected:
             try:
                 client2 = paramiko.SSHClient()
-                client2.set_missing_host_key_policy(paramiko.WarningPolicy())
+                try:
+                    if os.path.exists(_known_hosts):
+                        client2.load_host_keys(_known_hosts)
+                except Exception:
+                    pass
+                client2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 
                 transport2 = paramiko.Transport((host, 22))
                 _configure_transport_algorithms(transport2)
@@ -192,7 +205,12 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
         if not connected:
             try:
                 client3 = paramiko.SSHClient()
-                client3.set_missing_host_key_policy(paramiko.WarningPolicy())
+                try:
+                    if os.path.exists(_known_hosts):
+                        client3.load_host_keys(_known_hosts)
+                except Exception:
+                    pass
+                client3.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 client3.connect(host, username=user, password=password, timeout=timeout,
                                allow_agent=False, look_for_keys=False)
                 client = client3
@@ -205,6 +223,12 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
             err_detail = '; '.join(errors)
             raise Exception(f'Paramiko auth failed ({len(errors)} methods): {err_detail}')
         
+        # MK: Mar 2026 - persist host keys (TOFU model)
+        try:
+            client.save_host_keys(_known_hosts)
+        except Exception:
+            pass  # config dir might not be writable
+
         # Execute command
         try:
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
@@ -228,8 +252,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
         env['SSHPASS'] = password
         result = subprocess.run(
             ['sshpass', '-e', 'ssh',
-             '-o', 'StrictHostKeyChecking=no',
-             '-o', 'UserKnownHostsFile=/dev/null',
+             '-o', 'StrictHostKeyChecking=accept-new',
+             '-o', f'UserKnownHostsFile={_known_hosts}',
              '-o', 'LogLevel=ERROR',
              '-o', 'PreferredAuthentications=keyboard-interactive,password',
              '-o', 'HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256',

@@ -889,6 +889,17 @@ def get_server_settings():
     # Add info about existing cert/key files
     settings['ssl_cert_exists'] = os.path.exists(SSL_CERT_FILE)
     settings['ssl_key_exists'] = os.path.exists(SSL_KEY_FILE)
+    # MK: Mar 2026 - include cert info for ACME status (#96)
+    try:
+        from pegaprox.core.acme import get_cert_info
+        from pathlib import Path
+        if Path("/usr/lib/pegaprox").exists():
+            _ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
+        else:
+            _ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
+        settings['cert_info'] = get_cert_info(_ssl_dir)
+    except Exception:
+        settings['cert_info'] = None
     # Don't return actual cert/key content or sensitive passwords
     # Mask SMTP password if set
     if settings.get('smtp_password'):
@@ -955,6 +966,13 @@ def update_server_settings():
                 if settings.get('ssl_enabled') != new_ssl:
                     restart_required = True
                 settings['ssl_enabled'] = new_ssl
+            # MK: Mar 2026 - ACME settings (#96)
+            if 'acme_enabled' in data:
+                settings['acme_enabled'] = bool(data['acme_enabled'])
+            if 'acme_email' in data:
+                settings['acme_email'] = str(data['acme_email']).strip()
+            if 'acme_staging' in data:
+                settings['acme_staging'] = bool(data['acme_staging'])
             
             # security/bruteforce settings
             if 'login_max_attempts' in data:
@@ -996,6 +1014,21 @@ def update_server_settings():
                     log_audit(request.session.get('user', 'admin'), 'settings.password_expiry', 
                               f"Admin password expiry {'enabled' if settings['password_expiry_include_admins'] else 'disabled'}")
             
+            # NS Mar 2026 - reverse proxy / nginx settings
+            if 'reverse_proxy_enabled' in data:
+                new_rp = bool(data['reverse_proxy_enabled'])
+                if settings.get('reverse_proxy_enabled') != new_rp:
+                    restart_required = True
+                    log_audit(request.session.get('user', 'admin'), 'settings.reverse_proxy',
+                              f"Reverse proxy {'enabled' if new_rp else 'disabled'}")
+                settings['reverse_proxy_enabled'] = new_rp
+            if 'trusted_proxies' in data:
+                tp = str(data['trusted_proxies'] or '').strip()
+                settings['trusted_proxies'] = tp
+                # hot-reload the trusted proxy list so it takes effect immediately
+                from pegaprox.utils.audit import load_trusted_proxies
+                load_trusted_proxies(tp)
+
             # NS: Feb 2026 - Force 2FA for all users
             if 'force_2fa' in data:
                 old_val = settings.get('force_2fa')
@@ -1201,18 +1234,27 @@ def update_server_settings():
             http_redirect_port = request.form.get('http_redirect_port', '0')
             ssl_enabled = request.form.get('ssl_enabled', 'false').lower() == 'true'
             default_theme = request.form.get('default_theme', 'proxmoxDark')
-            
+            reverse_proxy = request.form.get('reverse_proxy_enabled', 'false').lower() == 'true'
+            trusted_proxies = request.form.get('trusted_proxies', '').strip()
+
             if settings.get('port') != int(port):
                 restart_required = True
             if settings.get('http_redirect_port') != int(http_redirect_port):
                 restart_required = True
             if settings.get('ssl_enabled') != ssl_enabled:
                 restart_required = True
-            
+            if settings.get('reverse_proxy_enabled') != reverse_proxy:
+                restart_required = True
+
             settings['domain'] = domain
             settings['port'] = int(port)
             settings['http_redirect_port'] = int(http_redirect_port)
             settings['ssl_enabled'] = ssl_enabled
+            settings['reverse_proxy_enabled'] = reverse_proxy
+            settings['trusted_proxies'] = trusted_proxies
+            # hot-reload trusted proxies
+            from pegaprox.utils.audit import load_trusted_proxies
+            load_trusted_proxies(trusted_proxies)
             
             # NS: Default theme for new users - Jan 2026
             allowed_themes = [
@@ -1332,6 +1374,84 @@ def restart_server():
     except Exception as e:
         logging.error(f"Error restarting server: {e}")
         return jsonify({'error': safe_error(e, 'Server restart failed')}), 500
+
+# MK: Mar 2026 - ACME / Let's Encrypt endpoints (#96)
+@bp.route('/api/settings/acme/status', methods=['GET'])
+@require_auth(roles=[ROLE_ADMIN])
+def get_acme_status():
+    """Get ACME certificate status and settings"""
+    try:
+        from pegaprox.core.acme import get_cert_info
+        from pathlib import Path
+
+        if Path("/usr/lib/pegaprox").exists():
+            ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
+        else:
+            ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
+
+        settings = load_server_settings()
+        cert_info = get_cert_info(ssl_dir)
+
+        return jsonify({
+            'acme_enabled': settings.get('acme_enabled', False),
+            'acme_email': settings.get('acme_email', ''),
+            'acme_staging': settings.get('acme_staging', False),
+            'domain': settings.get('domain', ''),
+            'cert': cert_info,
+        })
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to get ACME status')}), 500
+
+
+@bp.route('/api/settings/acme/request', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def request_acme_certificate():
+    """Request a new Let's Encrypt certificate (admin only)"""
+    try:
+        from pegaprox.core.acme import request_certificate
+        from pathlib import Path
+
+        if Path("/usr/lib/pegaprox").exists():
+            ssl_dir = str(Path("/var/lib/pegaprox/ssl"))
+        else:
+            ssl_dir = str(Path(__file__).resolve().parent.parent.parent / 'ssl')
+
+        settings = load_server_settings()
+        data = request.get_json() or {}
+
+        domain = data.get('domain') or settings.get('domain', '')
+        email = data.get('email') or settings.get('acme_email', '')
+        staging = data.get('staging', settings.get('acme_staging', False))
+
+        if not domain:
+            return jsonify({'error': 'Domain is required'}), 400
+        if not email:
+            return jsonify({'error': 'Email is required for Let\'s Encrypt'}), 400
+
+        # persist ACME settings
+        settings['acme_enabled'] = True
+        settings['acme_email'] = email
+        settings['acme_staging'] = bool(staging)
+        settings['domain'] = domain
+        save_server_settings(settings)
+
+        usr = getattr(request, 'session', {}).get('user', 'admin')
+        log_audit(usr, 'settings.acme_request', f"ACME certificate requested for {domain} ({'staging' if staging else 'production'})")
+
+        result = request_certificate(domain, email, ssl_dir, staging=staging)
+
+        if result['success']:
+            # enable SSL automatically
+            settings['ssl_enabled'] = True
+            save_server_settings(settings)
+            log_audit(usr, 'settings.acme_issued', f"Certificate issued for {domain}, expires {result.get('expires', '?')}")
+
+        return jsonify(result)
+
+    except Exception as e:
+        logging.error(f"ACME request error: {e}")
+        return jsonify({'error': safe_error(e, 'Certificate request failed')}), 500
+
 
 # ============================================
 # Config Backup/Restore API Routes
@@ -2014,7 +2134,10 @@ def check_ip_whitelist():
     # Skip for static files
     if request.path.startswith('/static'):
         return None
-    
+    # MK: Mar 2026 - LE validation servers need access to challenge endpoint (#96)
+    if request.path.startswith('/.well-known/'):
+        return None
+
     # Skip if whitelist not enabled
     if not _ip_whitelist_enabled:
         return None

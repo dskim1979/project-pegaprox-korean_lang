@@ -3,7 +3,7 @@
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
         // Datastore Tab Component - with Storage Clusters for balancing
-        function DatastoreTab({ clusterId, addToast }) {
+        function DatastoreTab({ clusterId, addToast, initialStorage }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin } = useAuth();
             const [loading, setLoading] = useState(true);
@@ -184,7 +184,25 @@
                 fetchDatastores();
                 fetchStorageClusters();
             }, [clusterId]);
-            
+
+            // LW: Mar 2026 - auto-select storage from sidebar click
+            useEffect(() => {
+                if (!initialStorage || !initialLoadDone.current) return;
+                // find it in shared or local
+                const found = datastores.shared?.find(s => s.storage === initialStorage);
+                if (found) {
+                    loadStorageContent(initialStorage, null);
+                } else {
+                    // check local storages per node
+                    for (const [node, stores] of Object.entries(datastores.local || {})) {
+                        if (stores.some(s => s.storage === initialStorage)) {
+                            loadStorageContent(initialStorage, node);
+                            return;
+                        }
+                    }
+                }
+            }, [initialStorage, datastores]);
+
             const fetchDatastores = async () => {
                 // prevent concurrent fetches
                 if (fetchingRef.current) return;
@@ -547,7 +565,11 @@
                 });
                 
                 xhr.open('POST', `${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/upload`);
-                
+                xhr.withCredentials = true;
+
+                // LW: Mar 2026 - CSRF protection: custom header triggers CORS preflight
+                xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
                 // auth headers
                 const headers = getAuthHeaders();
                 for (const [key, value] of Object.entries(headers)) {

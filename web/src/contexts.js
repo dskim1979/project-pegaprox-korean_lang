@@ -101,7 +101,7 @@
                     
                     if (r && r.ok) {
                         const d = await r.json();
-                        console.log('Session check response:', d);
+                        // NS: removed session response log (leaked session_id to console)
                         if (d.authenticated) {
                             setUser(d.user);
                             setIsAuthenticated(true);
@@ -138,8 +138,7 @@
                         logout();
                     }
                 } catch (err) {
-                    console.error('Session check failed:', err);
-                    console.log('err obj:', err);
+                    console.error('Session check failed');
                     logout();
                 }
                 setLoading(false);
@@ -149,7 +148,7 @@
             // TODO: add "remember me" checkbox somtime
             const login = async (username, password, totpCode = '') => {
                 setError(null);
-                console.log('login attempt:', username);  // tmp debug
+                // NS: Mar 2026 - removed login attempt log (username in console = bad)
                 try {
                     const resp = await fetch(`${API_URL}/auth/login`, {
                         method: 'POST',
@@ -209,7 +208,7 @@
             // LW: Update user preferences (theme, language, ui_layout)
             const updatePreferences = async (prefs) => {
                 try {
-                    console.log('updatePreferences: Sending request with prefs:', prefs);
+                    if (DEBUG) console.log('updatePreferences:', Object.keys(prefs));
                     const r = await fetch(`${API_URL}/user/preferences`, {
                         method: 'PUT',
                         credentials: 'include',
@@ -218,11 +217,11 @@
                         },
                         body: JSON.stringify(prefs)
                     });
-                    console.log('updatePreferences: Response status:', r.status);
+                    if (DEBUG) console.log('updatePreferences status:', r.status);
                     
                     if (r.ok) {
                         const data = await r.json();
-                        console.log('updatePreferences: Response data:', data);
+                        if (DEBUG) console.log('updatePreferences: ok');
                         
                         // Update user in state
                         setUser(currentUser => {
@@ -233,7 +232,7 @@
                                 ui_layout: data.ui_layout,
                                 taskbar_auto_expand: data.taskbar_auto_expand
                             };
-                            console.log('updatePreferences: Updated user state:', updated);
+                            // LW: state updated, no log needed
                             return updated;
                         });
                         

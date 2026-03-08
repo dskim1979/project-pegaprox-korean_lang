@@ -149,15 +149,27 @@
                             term.write(`\x1b[33m${t('ipFetchFailed')}: ${e.message}\x1b[0m\r\n`);
                         }
 
+                        // NS: Mar 2026 - get short-lived WS token instead of exposing session in URL
+                        let wsToken = '';
+                        try {
+                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include' });
+                            if (tokenResp.ok) {
+                                const tokenData = await tokenResp.json();
+                                wsToken = tokenData.token;
+                            }
+                        } catch(e) {
+                            console.warn('WS token fetch failed, falling back');
+                        }
+
                         // Connect WebSocket - Shell runs on main port + 2
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                         const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
                         const sshPortNum = mainPort + 2;
                         setSshPort(sshPortNum);
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?session=${sessionId || ''}&ip=${encodeURIComponent(nodeIp)}`;
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}&ip=${encodeURIComponent(nodeIp)}`;
                         
                         term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
-                        console.log('SSH WebSocket connecting to:', wsUrl);
+                        // NS: Mar 2026 - don't log wsUrl, contains session token
                         
                         ws = new WebSocket(wsUrl);
                         wsRef.current = ws;
@@ -2605,14 +2617,26 @@
                         
                         if(cancelled) return;
                         
+                        // MK: Mar 2026 - fetch single-use WS token instead of passing session in URL
+                        let vncWsToken = '';
+                        try {
+                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include' });
+                            if (tokenResp.ok) {
+                                const td = await tokenResp.json();
+                                vncWsToken = td.token;
+                            }
+                        } catch(e) {
+                            console.warn('VNC WS token failed');
+                        }
+
                         // Build WebSocket URL - VNC runs on main port + 1
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                         const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
                         const vncPortNum = mainPort + 1;
                         setVncPort(vncPortNum);
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?session=${encodeURIComponent(sessionId)}`;
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}`;
                         
-                        console.log('VNC WebSocket URL:', wsUrl);
+                        // LW: Mar 2026 - removed wsUrl log (session leak)
                         
                         // Load noVNC - try local first (if downloaded), then CDN
                         if(!window.RFB) {
@@ -2678,7 +2702,7 @@
                             return;
                         }
                         
-                        console.log('VNC: Connecting to', wsUrl);
+                        console.log('VNC: Connecting...');
                         
                         // Create RFB with credentials
                         const rfbInstance = new window.RFB(canvasRef.current, wsUrl, {

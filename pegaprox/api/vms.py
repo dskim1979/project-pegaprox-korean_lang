@@ -41,14 +41,39 @@ bp = Blueprint('vms', __name__)
 def get_datacenter_status(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
+    # MK: XCP-ng clusters build status from their own cached data
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        try:
+            st = manager.get_cluster_status()
+            nodes = manager.get_nodes()
+            vms = manager.get_vms()
+            storages = manager.get_storages()
+            nodes_online = sum(1 for n in nodes if n.get('status') == 'online')
+            total_disk = sum(s.get('total', 0) for s in storages)
+            used_disk = sum(s.get('used', 0) for s in storages)
+            vms_running = len([v for v in vms if v.get('status') == 'running'])
+            vms_stopped = len([v for v in vms if v.get('status') == 'stopped'])
+            return jsonify({
+                'cluster': {'name': manager.config.name, 'quorate': None, 'standalone': False, 'version': 0, 'cluster_type': 'xcpng'},
+                'nodes': {'online': nodes_online, 'offline': len(nodes) - nodes_online, 'total': len(nodes)},
+                'guests': {'vms': {'running': vms_running, 'stopped': vms_stopped}, 'containers': {'running': 0, 'stopped': 0}},
+                'resources': {
+                    'cpu': {'total': st.get('total_cpu', 0), 'used': 0, 'percent': 0},
+                    'memory': {'total': st.get('total_mem', 0), 'used': st.get('used_mem', 0), 'percent': round(st['used_mem'] / st['total_mem'] * 100, 1) if st.get('total_mem') else 0},
+                    'storage': {'total': total_disk, 'used': used_disk, 'percent': round(used_disk / total_disk * 100, 1) if total_disk else 0},
+                }
+            })
+        except Exception as e:
+            return jsonify({'error': safe_error(e, 'Failed to get XCP-ng status')}), 500
+
     try:
         host = manager.current_host or manager.config.host
-        
+
         # get cluster status
         status_url = f"https://{host}:8006/api2/json/cluster/status"
         status_resp = manager._create_session().get(status_url, timeout=10)
@@ -56,10 +81,10 @@ def get_datacenter_status(cluster_id):
         # get resources
         resources_url = f"https://{host}:8006/api2/json/cluster/resources"
         resources_resp = manager._create_session().get(resources_url, timeout=10)
-        
+
         status_data = status_resp.json().get('data', []) if status_resp.status_code == 200 else []
         resources_data = resources_resp.json().get('data', []) if resources_resp.status_code == 200 else []
-        
+
         # calc summary
         nodes_online = sum(1 for s in status_data if s.get('type') == 'node' and s.get('online', 0) == 1)
         nodes_offline = sum(1 for s in status_data if s.get('type') == 'node' and s.get('online', 0) == 0)
@@ -127,21 +152,30 @@ def get_cluster_vms_list(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
+    # MK: XCP-ng clusters use their own get_vms()
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        try:
+            vms = manager.get_vms()
+            vms.sort(key=lambda x: x.get('vmid', 0))
+            return jsonify({'vms': vms})
+        except Exception as e:
+            return jsonify({'error': safe_error(e, 'Failed to list XCP-ng VMs')}), 500
+
     try:
         host = manager.current_host or manager.config.host
         resources_url = f"https://{host}:8006/api2/json/cluster/resources"
         resp = manager._create_session().get(resources_url, timeout=10)
-        
+
         if resp.status_code != 200:
             return jsonify({'error': 'Failed to fetch resources'}), 500
-        
+
         resources = resp.json().get('data', [])
-        
+
         # filter VMs and containers
         vms = []
         for r in resources:
@@ -381,12 +415,16 @@ def get_storage_list(cluster_id):
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
+    # XCP-ng storage list
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        return jsonify(manager.get_storages())
+
     try:
         host = manager.current_host or manager.config.host
         url = f"https://{host}:8006/api2/json/storage"
         r = manager._create_session().get(url, timeout=5)
-        
+
         if r.status_code == 200:
             return jsonify(r.json().get('data', []))
         return jsonify([])
@@ -400,11 +438,16 @@ def get_datastores(cluster_id):
     """Get all datastores with usage info"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
+    # XCP-ng: return SR list as datastores
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        storages = manager.get_storages()
+        return jsonify({'shared': storages, 'local': {}})
+
     try:
         host = manager.current_host or manager.config.host
         
@@ -731,6 +774,21 @@ def download_iso_from_url(cluster_id, storage_name):
         # Validate URL
         if not url.startswith('http://') and not url.startswith('https://'):
             return jsonify({'error': 'URL must start with http:// or https://'}), 400
+
+        # NS: Mar 2026 - block internal/metadata URLs to prevent SSRF
+        import ipaddress as _ipaddr
+        from urllib.parse import urlparse as _urlparse
+        try:
+            _parsed_host = _urlparse(url).hostname or ''
+            # resolve hostname to check if it points to internal IP
+            import socket as _sock
+            _resolved = _sock.getaddrinfo(_parsed_host, None, 0, _sock.SOCK_STREAM)
+            for _fam, _type, _proto, _canon, _addr in _resolved:
+                _ip = _ipaddr.ip_address(_addr[0])
+                if _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_reserved:
+                    return jsonify({'error': 'Download from internal/private networks is not allowed'}), 400
+        except (ValueError, _sock.gaierror):
+            pass  # can't resolve = let proxmox handle it
         
         # Extract filename from URL if not provided
         if not filename:
@@ -2862,16 +2920,21 @@ def vm_action_api(cluster_id, node, vm_type, vmid, action):
     user = users.get(request.session['user'], {})
     user['username'] = request.session['user']  # MK: make sure username is set
     
-    perm_map = {
-        'start': 'vm.start',
-        'stop': 'vm.stop',
-        'shutdown': 'vm.stop',
-        'reboot': 'vm.restart',
-        'reset': 'vm.restart',
-        'suspend': 'vm.stop',
-        'resume': 'vm.start'
-    }
-    required_perm = perm_map.get(action, 'vm.start')
+    # NS: xapi.vm.power covers all power actions for XCP-ng clusters
+    manager = cluster_managers[cluster_id]
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        required_perm = 'xapi.vm.power'
+    else:
+        perm_map = {
+            'start': 'vm.start',
+            'stop': 'vm.stop',
+            'shutdown': 'vm.stop',
+            'reboot': 'vm.restart',
+            'reset': 'vm.restart',
+            'suspend': 'vm.stop',
+            'resume': 'vm.start'
+        }
+        required_perm = perm_map.get(action, 'vm.start')
     
     # LW: Use VM-specific ACL check instead of general permission
     # MK: Added vm_type for pool permission check
@@ -3023,10 +3086,12 @@ def get_console_ticket(cluster_id, node, vm_type, vmid):
     user['username'] = request.session['user']
     
     # MK: Added vm_type for pool permission check
-    if not user_can_access_vm(user, cluster_id, vmid, 'vm.console', vm_type):
-        return jsonify({'error': 'Permission denied: vm.console'}), 403
-    
+    # NS: XCP-ng uses xapi.vm.view for console (no separate console perm)
     mgr = cluster_managers[cluster_id]
+    console_perm = 'xapi.vm.view' if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng' else 'vm.console'
+    if not user_can_access_vm(user, cluster_id, vmid, console_perm, vm_type):
+        return jsonify({'error': f'Permission denied: {console_perm}'}), 403
+
     result = mgr.get_vnc_ticket(node, vmid, vm_type)
     
     if result['success']:
@@ -3225,36 +3290,43 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
-    # MK: Check pool permission for vm.config
+
+    manager = cluster_managers[cluster_id]
+
+    # MK: Check pool permission for vm.config (+ xapi.vm.config for XCP-ng)
     users = load_users()
     user = users.get(request.session['user'], {})
     user['username'] = request.session['user']
-    if not user_can_access_vm(user, cluster_id, vmid, 'vm.config', vm_type):
-        return jsonify({'error': 'Permission denied: vm.config'}), 403
-    
-    manager = cluster_managers[cluster_id]
+
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        from pegaprox.utils.rbac import has_permission
+        if not has_permission(user, 'xapi.vm.config'):
+            return jsonify({'error': 'Permission denied: xapi.vm.config'}), 403
+    else:
+        if not user_can_access_vm(user, cluster_id, vmid, 'vm.config', vm_type):
+            return jsonify({'error': 'Permission denied: vm.config'}), 403
+
     config_updates = request.json or {}
-    
+
     result = manager.update_vm_config(node, vmid, vm_type, config_updates)
-    
+
     if result['success']:
         # NS: Broadcast VM config change via SSE for live UI updates
         try:
             updated_config = manager.get_vm_config(node, vmid, vm_type)
-            if updated_config.get('success'):
+            # XCP-ng returns flat dict, Proxmox wraps in {'success': ..., 'config': ...}
+            if isinstance(updated_config, dict):
+                cfg = updated_config.get('config', updated_config)
                 broadcast_sse('vm_config', {
-                    'vmid': vmid,
-                    'node': node,
-                    'vm_type': vm_type,
-                    'config': updated_config.get('config', {})
+                    'vmid': vmid, 'node': node,
+                    'vm_type': vm_type, 'config': cfg
                 }, cluster_id)
         except Exception as e:
             logging.debug(f"Failed to broadcast vm_config SSE: {e}")
-        
+
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
         changes = ', '.join([f"{k}={v}" for k, v in config_updates.items()][:5])
@@ -5112,23 +5184,36 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
-    # Auth check via query param
+    # NS: Mar 2026 - prefer WS token, session as fallback
+    from pegaprox.utils.realtime import validate_ws_token
+    ws_token = request.args.get('token')
     session_id = request.args.get('session')
-    if not session_id:
-        return jsonify({'error': 'Session required', 'code': 'AUTH_REQUIRED'}), 401
-    
-    session = validate_session(session_id)
-    if not session:
-        return jsonify({'error': 'Invalid session', 'code': 'INVALID_SESSION'}), 401
-    
+
+    auth_user = None
+    auth_role = None
+    if ws_token:
+        token_data = validate_ws_token(ws_token)
+        if not token_data:
+            return jsonify({'error': 'Invalid token', 'code': 'INVALID_TOKEN'}), 401
+        auth_user = token_data['user']
+        auth_role = token_data['role']
+    elif session_id:
+        session = validate_session(session_id)
+        if not session:
+            return jsonify({'error': 'Invalid session', 'code': 'INVALID_SESSION'}), 401
+        auth_user = session['user']
+        auth_role = session['role']
+    else:
+        return jsonify({'error': 'Auth required', 'code': 'AUTH_REQUIRED'}), 401
+
     # Check permissions
     users = load_users()
-    user = users.get(session['user'], {})
+    user = users.get(auth_user, {})
     user_perms = get_user_permissions(user)
-    if 'vm.console' not in user_perms and session['role'] != ROLE_ADMIN:
+    if 'vm.console' not in user_perms and auth_role != ROLE_ADMIN:
         return jsonify({'error': 'Permission denied', 'code': 'INSUFFICIENT_PERMISSIONS'}), 403
-    
-    # This route is just a fallback - actual WebSocket handling is done by the 
+
+    # This route is just a fallback - actual WebSocket handling is done by the
     # dedicated WebSocket server started in start_vnc_websocket_server()
     from flask import request
     
@@ -5197,33 +5282,48 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         print(f"VNC WebSocket connected: {path}")
         print(f"{'='*60}")
         
-        # Extract session from query params
+        # NS: Mar 2026 - authenticate via single-use WS token (not session in URL)
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(path)
         query_params = parse_qs(parsed.query)
+        ws_token = query_params.get('token', [None])[0]
+        # LW: backwards compat, accept session= too for now
         session_id = query_params.get('session', [None])[0]
-        
-        if not session_id:
-            print("ERROR: No session provided")
+
+        if ws_token:
+            from pegaprox.utils.realtime import validate_ws_token
+            token_data = validate_ws_token(ws_token)
+            if not token_data:
+                print("ERROR: Invalid or expired WS token")
+                await websocket.close(1002, "Invalid token")
+                return
+            # check perms from token
+            users = load_users()
+            user = users.get(token_data['user'], {})
+            user_perms = get_user_permissions(user)
+            if 'vm.console' not in user_perms and token_data['role'] != ROLE_ADMIN:
+                print(f"ERROR: User {token_data['user']} lacks vm.console permission")
+                await websocket.close(1002, "Permission denied")
+                return
+            print(f"User {token_data['user']} authenticated for VNC (ws_token)")
+        elif session_id:
+            session = validate_session(session_id)
+            if not session:
+                print("ERROR: Invalid session")
+                await websocket.close(1002, "Invalid session")
+                return
+            users = load_users()
+            user = users.get(session['user'], {})
+            user_perms = get_user_permissions(user)
+            if 'vm.console' not in user_perms and session['role'] != ROLE_ADMIN:
+                print(f"ERROR: User {session['user']} lacks vm.console permission")
+                await websocket.close(1002, "Permission denied")
+                return
+            print(f"User {session['user']} authenticated for VNC (session)")
+        else:
+            print("ERROR: No token or session provided")
             await websocket.close(1002, "Authentication required")
             return
-        
-        session = validate_session(session_id)
-        if not session:
-            print("ERROR: Invalid session")
-            await websocket.close(1002, "Invalid session")
-            return
-        
-        # Check permissions
-        users = load_users()
-        user = users.get(session['user'], {})
-        user_perms = get_user_permissions(user)
-        if 'vm.console' not in user_perms and session['role'] != ROLE_ADMIN:
-            print(f"ERROR: User {session['user']} lacks vm.console permission")
-            await websocket.close(1002, "Permission denied")
-            return
-        
-        print(f"User {session['user']} authenticated for VNC")
         
         # Parse path: /api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/vncwebsocket
         import re
@@ -5727,12 +5827,13 @@ async def ssh_handler(websocket):
     from urllib.parse import urlparse, parse_qs, unquote
     parsed = urlparse(path)
     query = parse_qs(parsed.query)
-    session_id = query.get('session', [None])[0]
+    ws_token = query.get('token', [None])[0]
+    session_id = query.get('session', [None])[0]  # LW: backwards compat
     prefetched_ip = query.get('ip', [None])[0]  # IP pre-fetched by frontend
     if prefetched_ip:
         prefetched_ip = unquote(prefetched_ip)
         print(f"Frontend provided IP: {prefetched_ip}")
-    
+
     # Match both /shell and /shellws
     match = re.match(r'/api/clusters/([^/]+)/nodes/([^/]+)/shell(?:ws)?', parsed.path)
     if not match:
@@ -5740,34 +5841,37 @@ async def ssh_handler(websocket):
         await websocket.send('{"status":"error","message":"Invalid path"}')
         await websocket.close(1008, "Invalid path")
         return
-    
+
     cluster_id, node = match.groups()
     print(f"Cluster: {cluster_id}, Node: {node}")
-    
-    # Validate session (just to ensure user is logged in to PegaProx)
-    if not session_id:
-        print("No session provided")
-        await websocket.send('{"status":"error","message":"No session provided"}')
-        await websocket.close(1008, "No session")
+
+    # NS: Mar 2026 - prefer WS token auth (single-use, doesn't leak session)
+    auth_token = ws_token or session_id
+    if not auth_token:
+        print("No token or session provided")
+        await websocket.send('{"status":"error","message":"No auth token provided"}')
+        await websocket.close(1008, "No auth")
         return
-    
-    print(f"Session ID received: {session_id[:20]}..." if len(session_id) > 20 else f"Session ID: {session_id}")
-    
+
+    # Validate via main server
     try:
-        print(f"Validating session with: {PEGAPROX_URL}/api/auth/validate")
-        # Try both cookie and header-based auth
-        headers = {'X-Session-ID': session_id}
-        r = requests.get(f"{PEGAPROX_URL}/api/auth/validate", 
-                        cookies={'session': session_id}, 
-                        headers=headers,
-                        timeout=5, verify=False)
-        print(f"Session validation response: {r.status_code}")
+        if ws_token:
+            validate_url = f"{PEGAPROX_URL}/api/ws/token/validate?token={ws_token}"
+            print("Validating WS token...")
+        else:
+            validate_url = f"{PEGAPROX_URL}/api/auth/validate"
+            print("Validating session (legacy)...")
+
+        headers = {'X-Session-ID': session_id} if session_id else {}
+        cookies = {'session': session_id} if session_id else {}
+        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=5, verify=False)
+
         if r.status_code != 200:
-            print(f"Session validation failed: {r.status_code} - {r.text[:100] if r.text else 'no body'}")
+            print(f"Auth failed: {r.status_code}")
             await websocket.send('{"status":"error","message":"Session ungültig - bitte neu einloggen"}')
-            await websocket.close(1008, "Invalid session")
+            await websocket.close(1008, "Invalid auth")
             return
-        print("Session validation successful")
+        print("Auth successful")
     except requests.exceptions.ConnectionError as e:
         print(f"Connection error to main server: {e}")
         # NS Feb 2026 - never skip auth, even if main server is unreachable
@@ -6370,35 +6474,42 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
         data = request.json or {}
         target_node = data.get('target')
         online = data.get('online', True)
-        target_storage = data.get('targetstorage')
-        with_local_disks = data.get('with-local-disks', False)
-        force = data.get('force', False)  # For conntrack state in containers
 
         if not target_node:
             return jsonify({'error': 'Target node is required'}), 400
 
-        # NS: Feb 2026 - Affinity rule enforcement (Issue #73)
-        from pegaprox.api.history import check_affinity_violation
-        aff = check_affinity_violation(cluster_id, vmid, target_node)
-        if aff.get('violation'):
-            if aff.get('enforce'):
-                return jsonify({
-                    'error': f"Migration blocked by affinity rule '{aff['rule']}': {aff['message']}",
-                    'affinity_violation': True, 'rule': aff['rule']
-                }), 409
-            else:
-                # MK: just warn, don't block
-                logging.warning(f"Affinity warning for VMID {vmid} -> {target_node}: {aff['message']} (not enforced)")
+        # NS Mar 2026: xapi.vm.migrate for XCP-ng clusters
+        if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+            from pegaprox.utils.rbac import has_permission
+            if not has_permission(user, 'xapi.vm.migrate'):
+                return jsonify({'error': 'Permission denied: xapi.vm.migrate'}), 403
 
-        # Build migration options
-        migrate_options = {
-            'online': online,
-            'targetstorage': target_storage,
-            'with_local_disks': with_local_disks,
-            'force': force
-        }
+            result = manager.migrate_vm_manual(node, vmid, vm_type, target_node, online)
+        else:
+            target_storage = data.get('targetstorage')
+            with_local_disks = data.get('with-local-disks', False)
+            force = data.get('force', False)  # For conntrack state in containers
 
-        result = manager.migrate_vm_manual(node, vmid, vm_type, target_node, online, migrate_options)
+            # NS: Feb 2026 - Affinity rule enforcement (Issue #73)
+            from pegaprox.api.history import check_affinity_violation
+            aff = check_affinity_violation(cluster_id, vmid, target_node)
+            if aff.get('violation'):
+                if aff.get('enforce'):
+                    return jsonify({
+                        'error': f"Migration blocked by affinity rule '{aff['rule']}': {aff['message']}",
+                        'affinity_violation': True, 'rule': aff['rule']
+                    }), 409
+                else:
+                    # MK: just warn, don't block
+                    logging.warning(f"Affinity warning for VMID {vmid} -> {target_node}: {aff['message']} (not enforced)")
+
+            migrate_options = {
+                'online': online,
+                'targetstorage': target_storage,
+                'with_local_disks': with_local_disks,
+                'force': force
+            }
+            result = manager.migrate_vm_manual(node, vmid, vm_type, target_node, online, migrate_options)
 
         if result.get('success'):
             # Audit log
@@ -6406,23 +6517,18 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
             details = f"{vm_type.upper()} {vmid} migrated from {node} to {target_node}"
             if online:
                 details += " (online)"
-            if target_storage:
-                details += f" to storage {target_storage}"
             log_audit(user, 'vm.migrated', details, cluster=manager.config.name)
 
             # NS: Register PegaProx user for this task
-            upid = result.get('upid') or result.get('data')
+            upid = result.get('upid') or result.get('task') or result.get('data')
             if upid:
                 register_task_user(upid, user, cluster_id)
 
-            # NS: Push immediate update for live UI
             push_immediate_update(cluster_id, delay=0.5)
-
             return jsonify(result)
         else:
             return jsonify(result), 400
     except Exception as e:
-        # NS: Mar 2026 - catch-all so frontend gets JSON, not HTML 500
         logging.error(f"[MIGRATE] Unhandled error migrating {vm_type}/{vmid}: {e}", exc_info=True)
         return jsonify({'error': f'Migration failed: {str(e)}'}), 500
 
@@ -6907,8 +7013,18 @@ def get_templates_api(cluster_id, node):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
+
+    # LW: XCP-ng templates need xapi.template.view permission
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        from pegaprox.utils.rbac import has_permission
+        users = load_users()
+        u = users.get(request.session['user'], {})
+        u['username'] = request.session['user']
+        if not has_permission(u, 'xapi.template.view'):
+            return jsonify({'error': 'Permission denied: xapi.template.view'}), 403
+
     templates = manager.get_templates(node)
     return jsonify(templates)
 
@@ -6919,28 +7035,38 @@ def create_vm_api(cluster_id, node):
     """Create a new VM on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     manager = cluster_managers[cluster_id]
+
+    # NS Mar 2026: XCP-ng clusters need xapi.vm.create permission
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        users = load_users()
+        u = users.get(request.session['user'], {})
+        u['username'] = request.session['user']
+        from pegaprox.utils.rbac import has_permission
+        if not has_permission(u, 'xapi.vm.create'):
+            return jsonify({'error': 'Permission denied: xapi.vm.create'}), 403
+
     vm_config = request.json or {}
-    
+
     result = manager.create_vm(node, vm_config)
-    
+
     if result.get('success'):
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'unknown')
-        vmid = vm_config.get('vmid') or result.get('data', {}).get('vmid', 'unknown')
+        vmid = vm_config.get('vmid') or result.get('vmid') or result.get('data', {}).get('vmid', 'unknown')
         vm_name = vm_config.get('name', f'vm-{vmid}')
         log_audit(user, 'vm.create', f"Created VM {vmid} ({vm_name}) on {node}", cluster=manager.config.name)
-        
+
         # Broadcast to all clients
         broadcast_action('create', 'qemu', str(vmid), {'node': node, 'name': vm_name}, cluster_id, user)
-        
+
         # NS: Push immediate update for live UI
         push_immediate_update(cluster_id, delay=0.5)
-        
+
         return jsonify(result)
     else:
         return jsonify(result), 400

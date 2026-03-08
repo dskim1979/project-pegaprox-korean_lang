@@ -106,6 +106,14 @@
             const [showCreateMds, setShowCreateMds] = useState(false);
             const [cephSubTab, setCephSubTab] = useState('status');
 
+            // MK: RBD Mirroring state
+            const [mirrorData, setMirrorData] = useState(null);
+            const [mirrorLoading, setMirrorLoading] = useState(false);
+            const [mirrorPoolDetail, setMirrorPoolDetail] = useState(null); // pool name when viewing images
+            const [mirrorImages, setMirrorImages] = useState([]);
+            const [showMirrorModal, setShowMirrorModal] = useState(null); // 'enable' | 'peer' | 'schedule' | 'promote'
+            const [mirrorForm, setMirrorForm] = useState({ mode: 'image', client: 'client.admin', site_name: '', mon_host: '', interval: '1h', image: '', force: false });
+
             /*
              * MK: CPU generation detection for recommended CPU type
              * Maps physical CPU model to x86-64 microarchitecture level
@@ -599,6 +607,39 @@
                     console.error('Failed to load Ceph data:', e);
                 }
                 setCephLoading(false);
+            };
+
+            // MK: fetch mirror overview data via SSH-based endpoints
+            const fetchMirrorData = async () => {
+                setMirrorLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/overview`);
+                    if (res?.ok) {
+                        const d = await res.json();
+                        setMirrorData(d);
+                    } else {
+                        setMirrorData({ pools: [], error: 'Failed to load mirror data' });
+                    }
+                } catch (e) {
+                    console.error('Mirror data fetch failed:', e);
+                    setMirrorData({ pools: [], error: e.message });
+                }
+                setMirrorLoading(false);
+            };
+
+            // NS: load images for a specific pool's mirror detail view
+            const fetchMirrorImages = async (pool) => {
+                setMirrorLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool}/images`);
+                    if (res?.ok) {
+                        const d = await res.json();
+                        setMirrorImages(d.images || []);
+                    }
+                } catch (e) {
+                    console.error('Mirror images fetch failed:', e);
+                }
+                setMirrorLoading(false);
             };
 
             // NS: added PB for large storages, using toFixed(2) for more precision
@@ -5280,10 +5321,13 @@
                                     <>
                                         {/* Ceph Sub-tabs */}
                                         <div className="flex gap-1 border-b border-proxmox-border pb-2">
-                                            {['status', 'osds', 'monitors', 'pools', 'fs'].map(st => (
+                                            {['status', 'osds', 'monitors', 'pools', 'fs', 'mirroring'].map(st => (
                                                 <button
                                                     key={st}
-                                                    onClick={() => setCephSubTab(st)}
+                                                    onClick={() => {
+                                                        setCephSubTab(st);
+                                                        if (st === 'mirroring' && !mirrorData) fetchMirrorData();
+                                                    }}
                                                     className={`px-4 py-2 rounded-lg text-sm transition-colors ${
                                                         cephSubTab === st
                                                             ? 'bg-proxmox-orange text-white'
@@ -5294,7 +5338,8 @@
                                                      st === 'osds' ? 'OSDs' :
                                                      st === 'monitors' ? t('cephMons') || 'Monitors' :
                                                      st === 'pools' ? t('cephPools') || 'Pools' :
-                                                     'CephFS'}
+                                                     st === 'fs' ? 'CephFS' :
+                                                     t('cephMirroring') || 'Mirroring'}
                                                 </button>
                                             ))}
                                         </div>
@@ -5654,6 +5699,421 @@
                                                             {(!cephData.mds?.data || cephData.mds.data.length === 0) && (
                                                                 <div className="p-4 text-center text-gray-500 text-sm">No MDS daemons</div>
                                                             )}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* LW: Mirroring Tab - Mar 2026 */}
+                                        {cephSubTab === 'mirroring' && (
+                                            <div className="space-y-4">
+                                                {mirrorLoading ? (
+                                                    <div className="flex items-center justify-center py-12">
+                                                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-proxmox-orange"></div>
+                                                    </div>
+                                                ) : mirrorPoolDetail ? (
+                                                    /* Image detail view for a specific pool */
+                                                    <div className="space-y-4">
+                                                        <div className="flex items-center gap-3">
+                                                            <button onClick={() => { setMirrorPoolDetail(null); setMirrorImages([]); }} className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors flex items-center gap-1">
+                                                                <Icons.ChevronLeft className="w-4 h-4" /> {t('cephMirrorBackToOverview') || 'Back'}
+                                                            </button>
+                                                            <h3 className="font-semibold">{t('cephMirrorImages') || 'Images'}: {mirrorPoolDetail}</h3>
+                                                            <button onClick={() => fetchMirrorImages(mirrorPoolDetail)} className="ml-auto px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
+                                                                <Icons.RefreshCw className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
+
+                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                            {mirrorImages.length === 0 ? (
+                                                                <div className="p-8 text-center text-gray-500">No images in this pool</div>
+                                                            ) : (
+                                                                <table className="w-full text-sm">
+                                                                    <thead>
+                                                                        <tr className="border-b border-proxmox-border text-left text-gray-400">
+                                                                            <th className="p-3">Image</th>
+                                                                            <th className="p-3">{t('status')}</th>
+                                                                            <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
+                                                                            <th className="p-3">{t('cephMirrorSyncStatus') || 'Sync'}</th>
+                                                                            <th className="p-3">{t('actions')}</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {mirrorImages.map((img, idx) => {
+                                                                            const m = img.mirroring || {};
+                                                                            const state = m.state || 'unknown';
+                                                                            const isPrimary = state.includes('primary');
+                                                                            const desc = m.description || '';
+                                                                            // NS: color code sync status
+                                                                            const syncColor = desc.includes('replaying') ? 'text-green-400' :
+                                                                                desc.includes('syncing') ? 'text-blue-400' :
+                                                                                desc.includes('stopped') ? 'text-yellow-400' :
+                                                                                desc.includes('error') ? 'text-red-400' : 'text-gray-400';
+                                                                            return (
+                                                                                <tr key={idx} className="border-b border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                                    <td className="p-3 font-medium">{img.name}</td>
+                                                                                    <td className="p-3">
+                                                                                        <span className={`px-2 py-0.5 rounded text-xs ${isPrimary ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-600/20 text-gray-400'}`}>
+                                                                                            {isPrimary ? 'primary' : state}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td className="p-3 text-gray-400">{m.mode || '-'}</td>
+                                                                                    <td className={`p-3 ${syncColor}`}>{desc || '-'}</td>
+                                                                                    <td className="p-3">
+                                                                                        <div className="flex gap-1">
+                                                                                            {!m.state ? (
+                                                                                                <button
+                                                                                                    onClick={async () => {
+                                                                                                        try {
+                                                                                                            await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/enable`, {
+                                                                                                                method: 'POST', headers: {'Content-Type':'application/json'},
+                                                                                                                body: JSON.stringify({ mode: 'snapshot' })
+                                                                                                            });
+                                                                                                            fetchMirrorImages(mirrorPoolDetail);
+                                                                                                        } catch(e) {}
+                                                                                                    }}
+                                                                                                    className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
+                                                                                                >{t('enable')}</button>
+                                                                                            ) : (
+                                                                                                <>
+                                                                                                    <button
+                                                                                                        onClick={() => { setMirrorForm(f => ({...f, image: img.name, force: false})); setShowMirrorModal('promote'); }}
+                                                                                                        className="px-2 py-1 text-xs bg-blue-500/20 hover:bg-blue-500/30 rounded text-blue-400 transition-colors"
+                                                                                                        title={t('cephMirrorPromote')}
+                                                                                                    >{t('cephMirrorPromote') || 'Promote'}</button>
+                                                                                                    <button
+                                                                                                        onClick={async () => {
+                                                                                                            if (!confirm(`Demote ${img.name}?`)) return;
+                                                                                                            try {
+                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/demote`, { method: 'POST' });
+                                                                                                                fetchMirrorImages(mirrorPoolDetail);
+                                                                                                            } catch(e) {}
+                                                                                                        }}
+                                                                                                        className="px-2 py-1 text-xs bg-yellow-500/20 hover:bg-yellow-500/30 rounded text-yellow-400 transition-colors"
+                                                                                                    >{t('cephMirrorDemote') || 'Demote'}</button>
+                                                                                                    <button
+                                                                                                        onClick={async () => {
+                                                                                                            if (!confirm(`Resync ${img.name}? This will re-mirror from remote.`)) return;
+                                                                                                            try {
+                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/resync`, { method: 'POST' });
+                                                                                                                fetchMirrorImages(mirrorPoolDetail);
+                                                                                                            } catch(e) {}
+                                                                                                        }}
+                                                                                                        className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
+                                                                                                    >{t('cephMirrorResync') || 'Resync'}</button>
+                                                                                                    <button
+                                                                                                        onClick={async () => {
+                                                                                                            if (!confirm(`Disable mirroring for ${img.name}?`)) return;
+                                                                                                            try {
+                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${img.name}/disable`, { method: 'POST' });
+                                                                                                                fetchMirrorImages(mirrorPoolDetail);
+                                                                                                            } catch(e) {}
+                                                                                                        }}
+                                                                                                        className="px-2 py-1 text-xs hover:bg-red-500/20 rounded text-red-400 transition-colors"
+                                                                                                    >{t('disable')}</button>
+                                                                                                </>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </td>
+                                                                                </tr>
+                                                                            );
+                                                                        })}
+                                                                    </tbody>
+                                                                </table>
+                                                            )}
+                                                        </div>
+
+                                                        {/* NS: Schedules section for this pool */}
+                                                        {(() => {
+                                                            const poolInfo = (mirrorData?.pools || []).find(p => p.name === mirrorPoolDetail);
+                                                            if (!poolInfo || poolInfo.mode === 'disabled') return null;
+                                                            return (
+                                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                                    <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                                                        <h4 className="font-semibold text-sm">{t('cephMirrorSchedules') || 'Snapshot Schedules'}</h4>
+                                                                        <button onClick={() => { setMirrorForm(f => ({...f, interval: '1h'})); setShowMirrorModal('schedule'); }}
+                                                                            className="flex items-center gap-1 px-3 py-1.5 bg-proxmox-orange text-white rounded-lg text-xs hover:bg-orange-600 transition-colors">
+                                                                            <Icons.Plus className="w-3 h-3" /> {t('cephMirrorAddSchedule') || 'Add'}
+                                                                        </button>
+                                                                    </div>
+                                                                    <div className="p-4 text-sm text-gray-400">
+                                                                        Schedules are managed per pool. Use the button above to add a snapshot schedule.
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
+                                                ) : (
+                                                    /* Overview: all pools with mirroring status */
+                                                    <div className="space-y-4">
+                                                        <div className="flex justify-between items-center">
+                                                            <h3 className="font-semibold">{t('cephMirroring') || 'RBD Mirroring'}</h3>
+                                                            <button onClick={fetchMirrorData} className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors">
+                                                                <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                            </button>
+                                                        </div>
+
+                                                        {mirrorData?.error && (
+                                                            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-400 text-sm">
+                                                                {mirrorData.error}
+                                                            </div>
+                                                        )}
+
+                                                        {/* NS: hint about SSH requirement */}
+                                                        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-blue-300 text-xs">
+                                                            {t('cephMirrorSshRequired') || 'RBD Mirroring requires SSH access to the cluster'}
+                                                        </div>
+
+                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                            {(!mirrorData?.pools || mirrorData.pools.length === 0) ? (
+                                                                <div className="p-8 text-center text-gray-500">{t('cephMirrorNoPoolsEnabled') || 'No pools found'}</div>
+                                                            ) : (
+                                                                <table className="w-full text-sm">
+                                                                    <thead>
+                                                                        <tr className="border-b border-proxmox-border text-left text-gray-400">
+                                                                            <th className="p-3">{t('name')}</th>
+                                                                            <th className="p-3">{t('cephMirrorMode') || 'Mode'}</th>
+                                                                            <th className="p-3">{t('cephMirrorPeers') || 'Peers'}</th>
+                                                                            <th className="p-3">{t('cephMirrorHealth') || 'Health'}</th>
+                                                                            <th className="p-3">{t('actions')}</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {mirrorData.pools.map((pool, idx) => (
+                                                                            <tr key={idx} className="border-b border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                                <td className="p-3 font-medium">{pool.name}</td>
+                                                                                <td className="p-3">
+                                                                                    <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                                        pool.mode === 'pool' ? 'bg-blue-500/20 text-blue-400' :
+                                                                                        pool.mode === 'image' ? 'bg-purple-500/20 text-purple-400' :
+                                                                                        'bg-gray-600/20 text-gray-400'
+                                                                                    }`}>{pool.mode}</span>
+                                                                                </td>
+                                                                                <td className="p-3 text-gray-400">
+                                                                                    {(pool.peers || []).length > 0 ? (
+                                                                                        <div className="space-y-1">
+                                                                                            {pool.peers.map((peer, pi) => (
+                                                                                                <div key={pi} className="flex items-center gap-2">
+                                                                                                    <span className="text-xs">{peer.site_name || peer.uuid?.slice(0,8) || '?'}</span>
+                                                                                                    {pool.mode !== 'disabled' && (
+                                                                                                        <button onClick={async () => {
+                                                                                                            if (!confirm(`Remove peer ${peer.site_name || peer.uuid}?`)) return;
+                                                                                                            try {
+                                                                                                                await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool.name}/peer/${peer.uuid}`, { method: 'DELETE' });
+                                                                                                                fetchMirrorData();
+                                                                                                            } catch(e) {}
+                                                                                                        }} className="text-red-400 hover:text-red-300" title={t('cephMirrorRemovePeer')}>
+                                                                                                            <Icons.X className="w-3 h-3" />
+                                                                                                        </button>
+                                                                                                    )}
+                                                                                                </div>
+                                                                                            ))}
+                                                                                        </div>
+                                                                                    ) : <span className="text-gray-600">-</span>}
+                                                                                </td>
+                                                                                <td className="p-3">
+                                                                                    {pool.health ? (
+                                                                                        <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                                            pool.health === 'OK' ? 'bg-green-500/20 text-green-400' :
+                                                                                            pool.health === 'WARNING' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                                                            pool.health === 'ERROR' ? 'bg-red-500/20 text-red-400' :
+                                                                                            'bg-gray-600/20 text-gray-400'
+                                                                                        }`}>{pool.health}</span>
+                                                                                    ) : <span className="text-gray-600">-</span>}
+                                                                                </td>
+                                                                                <td className="p-3">
+                                                                                    <div className="flex gap-1 flex-wrap">
+                                                                                        {pool.mode === 'disabled' ? (
+                                                                                            <button onClick={() => { setMirrorForm(f => ({...f, mode: 'image', _pool: pool.name})); setShowMirrorModal('enable'); }}
+                                                                                                className="px-2 py-1 text-xs bg-proxmox-orange/20 hover:bg-proxmox-orange/30 rounded text-orange-400 transition-colors">
+                                                                                                {t('cephMirrorEnable') || 'Enable'}
+                                                                                            </button>
+                                                                                        ) : (
+                                                                                            <>
+                                                                                                <button onClick={() => { setMirrorPoolDetail(pool.name); fetchMirrorImages(pool.name); }}
+                                                                                                    className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors">
+                                                                                                    {t('cephMirrorImages') || 'Images'}
+                                                                                                </button>
+                                                                                                <button onClick={() => { setMirrorForm(f => ({...f, _pool: pool.name, client: 'client.admin', site_name: '', mon_host: ''})); setShowMirrorModal('peer'); }}
+                                                                                                    className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors">
+                                                                                                    {t('cephMirrorAddPeer') || 'Add Peer'}
+                                                                                                </button>
+                                                                                                <button onClick={async () => {
+                                                                                                    if (!confirm(`Disable mirroring on pool "${pool.name}"?`)) return;
+                                                                                                    try {
+                                                                                                        await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${pool.name}/disable`, { method: 'POST' });
+                                                                                                        fetchMirrorData();
+                                                                                                    } catch(e) {}
+                                                                                                }} className="px-2 py-1 text-xs hover:bg-red-500/20 rounded text-red-400 transition-colors">
+                                                                                                    {t('cephMirrorDisable') || 'Disable'}
+                                                                                                </button>
+                                                                                            </>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Enable Mirroring Modal */}
+                                                {showMirrorModal === 'enable' && (
+                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
+                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
+                                                            <div className="p-4 border-b border-proxmox-border">
+                                                                <h3 className="font-semibold">{t('cephMirrorEnable') || 'Enable Mirroring'}: {mirrorForm._pool}</h3>
+                                                            </div>
+                                                            <div className="p-4 space-y-4">
+                                                                <div>
+                                                                    <label className="text-sm text-gray-400 mb-2 block">{t('cephMirrorMode') || 'Mode'}</label>
+                                                                    <div className="space-y-2">
+                                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                                            <input type="radio" name="mirrorMode" value="image" checked={mirrorForm.mode === 'image'} onChange={() => setMirrorForm(f => ({...f, mode: 'image'}))} className="text-proxmox-orange" />
+                                                                            <span className="text-sm">{t('cephMirrorModeImage') || 'Image (individual)'}</span>
+                                                                        </label>
+                                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                                            <input type="radio" name="mirrorMode" value="pool" checked={mirrorForm.mode === 'pool'} onChange={() => setMirrorForm(f => ({...f, mode: 'pool'}))} className="text-proxmox-orange" />
+                                                                            <span className="text-sm">{t('cephMirrorModePool') || 'Pool (all images)'}</span>
+                                                                        </label>
+                                                                    </div>
+                                                                    <p className="text-xs text-gray-500 mt-2">
+                                                                        {mirrorForm.mode === 'pool' ? 'All images in the pool will be mirrored automatically.' : 'You can enable mirroring per image after enabling pool-level image mode.'}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                                <button onClick={async () => {
+                                                                    try {
+                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorForm._pool}/enable`, {
+                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
+                                                                            body: JSON.stringify({ mode: mirrorForm.mode })
+                                                                        });
+                                                                        if (res?.ok) { setShowMirrorModal(null); fetchMirrorData(); }
+                                                                    } catch(e) {}
+                                                                }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors">
+                                                                    {t('enable')}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Add Peer Modal */}
+                                                {showMirrorModal === 'peer' && (
+                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
+                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
+                                                            <div className="p-4 border-b border-proxmox-border">
+                                                                <h3 className="font-semibold">{t('cephMirrorAddPeer') || 'Add Peer'}: {mirrorForm._pool}</h3>
+                                                            </div>
+                                                            <div className="p-4 space-y-4">
+                                                                <div>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">Client</label>
+                                                                    <input type="text" value={mirrorForm.client} onChange={e => setMirrorForm(f => ({...f, client: e.target.value}))}
+                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="client.admin" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorSiteName') || 'Site Name'}</label>
+                                                                    <input type="text" value={mirrorForm.site_name} onChange={e => setMirrorForm(f => ({...f, site_name: e.target.value}))}
+                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="remote-site" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">Monitor Hosts</label>
+                                                                    <input type="text" value={mirrorForm.mon_host} onChange={e => setMirrorForm(f => ({...f, mon_host: e.target.value}))}
+                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm" placeholder="10.0.0.1,10.0.0.2 (optional)" />
+                                                                    <p className="text-xs text-gray-500 mt-1">Comma-separated list of monitor addresses</p>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                                <button onClick={async () => {
+                                                                    if (!mirrorForm.site_name) return;
+                                                                    try {
+                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorForm._pool}/peer`, {
+                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
+                                                                            body: JSON.stringify({ client: mirrorForm.client, site_name: mirrorForm.site_name, mon_host: mirrorForm.mon_host })
+                                                                        });
+                                                                        if (res?.ok) { setShowMirrorModal(null); fetchMirrorData(); }
+                                                                    } catch(e) {}
+                                                                }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors" disabled={!mirrorForm.site_name}>
+                                                                    {t('add')}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Add Schedule Modal */}
+                                                {showMirrorModal === 'schedule' && (
+                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
+                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
+                                                            <div className="p-4 border-b border-proxmox-border">
+                                                                <h3 className="font-semibold">{t('cephMirrorAddSchedule') || 'Add Schedule'}: {mirrorPoolDetail}</h3>
+                                                            </div>
+                                                            <div className="p-4 space-y-4">
+                                                                <div>
+                                                                    <label className="text-sm text-gray-400 mb-1 block">{t('cephMirrorInterval') || 'Interval'}</label>
+                                                                    <select value={mirrorForm.interval} onChange={e => setMirrorForm(f => ({...f, interval: e.target.value}))}
+                                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2 text-sm">
+                                                                        <option value="5m">5 minutes</option>
+                                                                        <option value="15m">15 minutes</option>
+                                                                        <option value="1h">1 hour</option>
+                                                                        <option value="4h">4 hours</option>
+                                                                        <option value="1d">1 day</option>
+                                                                    </select>
+                                                                </div>
+                                                            </div>
+                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                                <button onClick={async () => {
+                                                                    try {
+                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/schedule`, {
+                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
+                                                                            body: JSON.stringify({ interval: mirrorForm.interval })
+                                                                        });
+                                                                        if (res?.ok) { setShowMirrorModal(null); }
+                                                                    } catch(e) {}
+                                                                }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors">
+                                                                    {t('add')}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Promote Image Modal */}
+                                                {showMirrorModal === 'promote' && (
+                                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowMirrorModal(null)}>
+                                                        <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl" onClick={e => e.stopPropagation()}>
+                                                            <div className="p-4 border-b border-proxmox-border">
+                                                                <h3 className="font-semibold">{t('cephMirrorPromote') || 'Promote'}: {mirrorForm.image}</h3>
+                                                            </div>
+                                                            <div className="p-4 space-y-4">
+                                                                <p className="text-sm text-yellow-400">Promoting makes this the primary copy. The remote will need to be demoted first (or use force).</p>
+                                                                <label className="flex items-center gap-2 cursor-pointer">
+                                                                    <input type="checkbox" checked={mirrorForm.force} onChange={e => setMirrorForm(f => ({...f, force: e.target.checked}))} className="rounded" />
+                                                                    <span className="text-sm text-red-400">{t('cephMirrorForcePromote') || 'Force promote (may cause data loss!)'}</span>
+                                                                </label>
+                                                            </div>
+                                                            <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                <button onClick={() => setShowMirrorModal(null)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                                <button onClick={async () => {
+                                                                    try {
+                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/ceph/mirror/pool/${mirrorPoolDetail}/image/${mirrorForm.image}/promote`, {
+                                                                            method: 'POST', headers: {'Content-Type':'application/json'},
+                                                                            body: JSON.stringify({ force: mirrorForm.force })
+                                                                        });
+                                                                        if (res?.ok) { setShowMirrorModal(null); fetchMirrorImages(mirrorPoolDetail); }
+                                                                    } catch(e) {}
+                                                                }} className={`px-4 py-2 rounded-lg text-white transition-colors ${mirrorForm.force ? 'bg-red-600 hover:bg-red-700' : 'bg-proxmox-orange hover:bg-orange-600'}`}>
+                                                                    {t('cephMirrorPromote') || 'Promote'}
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 )}

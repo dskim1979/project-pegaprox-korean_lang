@@ -56,6 +56,7 @@
         "pegaprox/core/pbs.py",
         "pegaprox/core/v2p.py",
         "pegaprox/core/vmware.py",
+        "pegaprox/core/xcpng.py",
         "pegaprox/globals.py",
         "pegaprox/models/__init__.py",
         "pegaprox/models/permissions.py",

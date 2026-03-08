@@ -96,11 +96,23 @@ def create_app():
     app.config['MAX_CONTENT_LENGTH'] = _upload_max  # set high, we check per-route below
 
     # Request validation & rate limiting
+    # LW: Mar 2026 - ACME HTTP-01 challenge route, must be unauthenticated (#96)
+    @app.route('/.well-known/acme-challenge/<token>')
+    def acme_challenge(token):
+        from pegaprox.core.acme import get_challenge_response
+        response = get_challenge_response(token)
+        if response:
+            return response, 200, {'Content-Type': 'text/plain'}
+        return '', 404
+
     @app.before_request
     def validate_request():
         if request.path.startswith('/static/') or request.path.startswith('/images/'):
             return None
         if request.path.startswith('/ws'):
+            return None
+        # MK: Mar 2026 - ACME challenges must bypass all security checks (#96)
+        if request.path.startswith('/.well-known/'):
             return None
 
         # NS: Feb 2026 - per-route size limits: uploads get the big limit, everything else 10MB
@@ -114,9 +126,9 @@ def create_app():
             skip_paths = ['/api/auth/login', '/api/auth/check', '/api/events', '/api/health', '/api/sse',
                           '/api/vmware/migrations']
             if not any(request.path.startswith(p) for p in skip_paths):
-                client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-                if client_ip:
-                    client_ip = client_ip.split(',')[0].strip()
+                # NS: Mar 2026 - use centralized get_client_ip, respects trusted_proxies
+                from pegaprox.utils.audit import get_client_ip
+                client_ip = get_client_ip()
 
                 if not _check_api_rate_limit(client_ip):
                     logging.warning(f"Rate limit exceeded for {client_ip}")
@@ -132,6 +144,20 @@ def create_app():
                 if request.content_length > 0:
                     return jsonify({'error': 'Invalid Content-Type'}), 415
 
+        # NS: Mar 2026 - CSRF check for multipart uploads (JSON reqs already need Content-Type: application/json which triggers preflight)
+        if request.method in ['POST', 'PUT', 'DELETE'] and request.path.startswith('/api/'):
+            content_type = request.content_type or ''
+            if 'multipart/form-data' in content_type:
+                # form uploads must have X-Requested-With or matching Origin
+                has_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+                origin = request.headers.get('Origin', '')
+                has_valid_origin = origin and (
+                    origin.startswith(f"{request.scheme}://{request.host}") or
+                    not origin  # same-origin requests may omit Origin
+                )
+                if not has_xhr and not has_valid_origin:
+                    return jsonify({'error': 'CSRF validation failed'}), 403
+
         return None
 
     # Security headers
@@ -143,11 +169,11 @@ def create_app():
         response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
 
+        # MK: Mar 2026 - tightened CSP, removed dead tailwindcss CDN ref (#118)
         csp = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-                "https://cdn.jsdelivr.net https://cdn.tailwindcss.com "
-                "https://cdnjs.cloudflare.com; "
+                "https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline' "
                 "https://fonts.googleapis.com https://cdn.jsdelivr.net; "
             "font-src 'self' data: https://fonts.gstatic.com https://fonts.googleapis.com; "
@@ -159,7 +185,10 @@ def create_app():
         )
         response.headers['Content-Security-Policy'] = csp
 
-        if request.is_secure or request.headers.get('X-Forwarded-Proto') == 'https':
+        # LW: Mar 2026 - only trust X-Forwarded-Proto from trusted proxies
+        from pegaprox.utils.audit import _is_trusted_proxy
+        is_https = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
+        if is_https:
             response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
 
         return response
@@ -499,6 +528,12 @@ def main(debug_mode=False):
     except ImportError:
         print("  ⚠ argon2-cffi - using PBKDF2 fallback")
 
+    try:
+        import XenAPI
+        print("  ✓ XenAPI (XCP-ng integration)")
+    except ImportError:
+        print("  ✗ XenAPI - XCP-ng clusters disabled (pip install XenAPI)")
+
     if missing_libs:
         print(f"\n  Install missing: pip install {' '.join(missing_libs)}")
     print()
@@ -536,10 +571,18 @@ def main(debug_mode=False):
     # Start managers for existing clusters
     for cluster_id, cluster_data in config.items():
         config_obj = PegaProxConfig(cluster_data)
-        manager = PegaProxManager(cluster_id, config_obj)
-        manager.start()
-        g.cluster_managers[cluster_id] = manager
-        print(f"Started PegaProx manager for cluster: {cluster_data['name']}")
+        ctype = cluster_data.get('cluster_type', 'proxmox')
+        if ctype == 'xcpng':
+            from pegaprox.core.xcpng import XcpngManager
+            manager = XcpngManager(cluster_id, config_obj)
+            manager.start()
+            g.cluster_managers[cluster_id] = manager
+            print(f"Started XCP-ng manager for pool: {cluster_data['name']}")
+        else:
+            manager = PegaProxManager(cluster_id, config_obj)
+            manager.start()
+            g.cluster_managers[cluster_id] = manager
+            print(f"Started PegaProx manager for cluster: {cluster_data['name']}")
 
     # Start background threads
     start_broadcast_thread()
@@ -583,13 +626,53 @@ def main(debug_mode=False):
     threading.Thread(target=warmup_pool_cache, daemon=True).start()
     print("Started pool cache warmup thread")
 
+    # MK: Mar 2026 - ACME auto-renewal thread (#96)
+    def acme_renewal_loop():
+        time.sleep(30)  # wait for server to fully start
+        while True:
+            try:
+                _settings = load_server_settings()
+                if _settings.get('acme_enabled') and _settings.get('domain'):
+                    from pegaprox.core.acme import check_and_renew
+                    if Path("/usr/lib/pegaprox").exists():
+                        _ssl = str(Path("/var/lib/pegaprox/ssl"))
+                    else:
+                        _ssl = str(Path(__file__).resolve().parent.parent / 'ssl')
+                    renewed = check_and_renew(
+                        _settings['domain'], _settings.get('acme_email', ''),
+                        _ssl, staging=_settings.get('acme_staging', False)
+                    )
+                    if renewed:
+                        logging.info("[ACME] Certificate renewed, restart required for new cert")
+            except Exception as e:
+                logging.debug(f"[ACME] Renewal check error: {e}")
+            time.sleep(86400)  # check once per day
+
+    threading.Thread(target=acme_renewal_loop, daemon=True).start()
+    print("Started ACME auto-renewal thread")
+
     # Load server settings
     server_settings = load_server_settings()
     port = server_settings.get('port', 5000)
     bind_host = os.environ.get('PEGAPROX_HOST')
 
+    # NS Mar 2026 - reverse proxy mode: skip SSL, bind localhost, trust proxy headers
+    reverse_proxy = server_settings.get('reverse_proxy_enabled', False)
+    if os.environ.get('PEGAPROX_BEHIND_PROXY', '').lower() in ('1', 'true', 'yes'):
+        reverse_proxy = True
+
+    # load trusted proxy IPs for X-Forwarded-For (loopback always trusted)
+    from pegaprox.utils.audit import load_trusted_proxies
+    trusted = os.environ.get('PEGAPROX_TRUSTED_PROXIES', '') or server_settings.get('trusted_proxies', '')
+    load_trusted_proxies(trusted)
+    if trusted:
+        print(f"Trusted proxies: {trusted}")
+
     if not bind_host:
-        if _test_ipv6_available():
+        if reverse_proxy:
+            bind_host = '127.0.0.1'
+            print("Reverse proxy mode — binding to 127.0.0.1 only")
+        elif _test_ipv6_available():
             bind_host = '::'
             print("IPv6 available — binding dual-stack (::)")
         else:
@@ -601,13 +684,18 @@ def main(debug_mode=False):
             print("Falling back to 0.0.0.0")
             bind_host = '0.0.0.0'
 
-    ssl_enabled = server_settings.get('ssl_enabled', False)
+    # MK: when behind proxy, SSL is handled by nginx/haproxy - we run plain HTTP
+    ssl_enabled = server_settings.get('ssl_enabled', False) and not reverse_proxy
     domain = server_settings.get('domain', '')
     app_name = server_settings.get('app_name', 'PegaProx')
+    if reverse_proxy:
+        print("SSL disabled (handled by reverse proxy)")
 
-    # Check for SSL certificates
+    # Check for SSL certificates (skip entirely behind reverse proxy)
     ssl_context = None
-    if ssl_enabled and os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE):
+    if reverse_proxy:
+        pass  # nginx handles SSL
+    elif ssl_enabled and os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE):
         ssl_context = (SSL_CERT_FILE, SSL_KEY_FILE)
         print("Custom SSL certificates found - starting with HTTPS")
     else:
@@ -659,13 +747,13 @@ def main(debug_mode=False):
                 print(f"WARNING: Could not generate SSL certificate: {e}")
                 print("Starting without HTTPS (noVNC may not work)")
 
-    # Start HTTP redirect server if SSL is enabled
-    http_redirect_port = server_settings.get('http_redirect_port', 0)  # 0 = auto, -1 = disabled
+    # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
+    http_redirect_port = server_settings.get('http_redirect_port', 0)
     if http_redirect_port == 0:
         http_redirect_port = 80 if os.geteuid() == 0 else -1
     http_redirect_port = int(os.environ.get('PEGAPROX_HTTP_PORT', http_redirect_port))
 
-    if ssl_context and http_redirect_port > 0:
+    if ssl_context and http_redirect_port > 0 and not reverse_proxy:
         redirect_thread = threading.Thread(
             target=_start_http_redirect,
             args=(bind_host, http_redirect_port, port, domain),
@@ -778,6 +866,24 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                         parts = first_line.split(' ')
                         if len(parts) >= 2:
                             path = parts[1].replace('\r', '').replace('\n', '')
+
+                    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting (#96)
+                    if path.startswith('/.well-known/acme-challenge/'):
+                        acme_token = path.split('/')[-1]
+                        from pegaprox.core.acme import get_challenge_response
+                        challenge_resp = get_challenge_response(acme_token)
+                        if challenge_resp:
+                            http_resp = (
+                                f"HTTP/1.1 200 OK\r\n"
+                                f"Content-Type: text/plain\r\n"
+                                f"Content-Length: {len(challenge_resp)}\r\n"
+                                f"Connection: close\r\n"
+                                f"\r\n"
+                                f"{challenge_resp}"
+                            )
+                            client.sendall(http_resp.encode())
+                            client.close()
+                            continue
 
                     host_header = ''
                     for line in request.split('\r\n'):

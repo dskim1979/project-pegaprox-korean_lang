@@ -782,14 +782,40 @@ class PegaProxManager:
                 else:
                     results = [fetch_node_details(node) for node in nodes]
                 
+                # NS Mar 2026 - sync native HA maintenance state (#78)
+                # dragon2611 reported LB migrating VMs back onto nodes going into
+                # proxmox-native maintenance. We poll /cluster/ha/status/current here
+                # and inject synthetic MaintenanceTask objects so the rest of the code
+                # treats them the same as our own maintenance mode.
+                try:
+                    native_ha_nodes = self._get_native_ha_maintenance_nodes()
+                except Exception:
+                    native_ha_nodes = set()
+
+                for nm in native_ha_nodes:
+                    if nm not in self.nodes_in_maintenance:
+                        from pegaprox.models.tasks import MaintenanceTask
+                        t = MaintenanceTask(nm)
+                        t.native_ha = True
+                        t.status = 'completed'
+                        t.total_vms = 0
+                        self.nodes_in_maintenance[nm] = t
+                        self.logger.info(f"[MAINT] Detected native HA maintenance on {nm} (set externally)")
+
+                # cleanup stale entries if someone disabled maintenance outside PegaProx
+                for nm in [n for n, tsk in self.nodes_in_maintenance.items()
+                           if getattr(tsk, 'native_ha', False) and n not in native_ha_nodes]:
+                    del self.nodes_in_maintenance[nm]
+                    self.logger.info(f"[MAINT] {nm} left native HA maintenance")
+
                 # Process results
                 for result in results:
                     if result is None:
                         continue
-                    
+
                     node_name, node, status_data = result
                     api_nodes.add(node_name)
-                    
+
                     if status_data:
                         self.logger.debug(f"Raw status data for {node_name}: {status_data}")
                         
@@ -1400,8 +1426,8 @@ class PegaProxManager:
         self.logger.error(f"Task {task_id} timed out after {timeout} seconds")
         return False
     
-    def enter_maintenance_mode(self, node_name: str, skip_evacuation: bool = False) -> MaintenanceTask:
-        """enter maintenance mode for a node, optionally skip VM evacuation"""
+    def enter_maintenance_mode(self, node_name, skip_evacuation=False):
+        # NS: tries native HA first, falls back to our own evacuation logic
         with self.maintenance_lock:
             if node_name in self.nodes_in_maintenance:
                 return self.nodes_in_maintenance[node_name]
@@ -1417,9 +1443,9 @@ class PegaProxManager:
             task.status = 'completed'
             task.total_vms = 0
             task.migrated_vms = 0
-        elif self.config.ha_enabled and self._try_native_ha_maintenance(node_name, task):
-            # NS feb 2026 - use native HA maintenance when available (#78)
-            pass  # task already marked as completed by _try_native_ha_maintenance
+        elif self._try_native_ha_maintenance(node_name, task):
+            # NS feb 2026 - always try native HA first, it's Proxmox-native not our HA (#78)
+            pass
         else:
             # Fallback: custom evacuation logic
             t = threading.Thread(target=self._evacuate_node, args=(node_name, task))
@@ -1428,45 +1454,66 @@ class PegaProxManager:
 
         return task
 
-    # NS feb 2026 - native Proxmox HA maintenance mode (#78)
+    def _get_native_ha_maintenance_nodes(self):
+        # MK Mar 2026 - polls /cluster/ha/status/current for nodes in native maintenance (#78)
+        # The HA status response has two relevant entry types:
+        #   type=node with status="maintenance"
+        #   id=manager_status with multi-line text "node1 master\nnode2 maintenance\n..."
+        # We check both because single-node clusters only have manager_status
+        try:
+            host = self.current_host or self.config.host
+            resp = self._api_get(f"https://{host}:8006/api2/json/cluster/ha/status/current")
+            if resp.status_code != 200:
+                return set()
+
+            result = set()
+            for entry in resp.json().get('data', []):
+                if entry.get('type') == 'node' and entry.get('status') == 'maintenance':
+                    result.add(entry.get('node', ''))
+                elif entry.get('id') == 'manager_status':
+                    # "pve1 master\npve2 maintenance\npve3 online\n"
+                    for line in entry.get('status', '').split('\n'):
+                        parts = line.strip().split()
+                        if len(parts) >= 2 and parts[1] == 'maintenance':
+                            result.add(parts[0])
+            return result
+        except Exception:
+            return set()
+
+    # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
+    # returns True if proxmox takes over, False = we do our own evacuation
     def _try_native_ha_maintenance(self, node_name, task):
-        """Try to enable native HA maintenance via ha-manager. Returns True on success."""
         try:
             node_ip = self._get_node_ip(node_name)
             if not node_ip:
-                self.logger.warning(f"[MAINT] Cannot resolve IP for {node_name}, falling back to custom evacuation")
+                self.logger.warning(f"[MAINT] can't resolve {node_name} IP, custom evacuation")
                 return False
 
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]
-            ssh_password = self.config.pass_
-            ssh_key = getattr(self.config, 'ssh_key', '')
-
+            ssh_user = (self.config.user or 'root').split('@')[0]
             cmd = f"ha-manager crm-command node-maintenance enable {node_name}"
-            self.logger.info(f"[MAINT] Trying native HA maintenance for {node_name}")
+            self.logger.info(f"[MAINT] Trying native HA for {node_name}")
 
-            # Try SSH auth methods in order: key -> passwordless -> password
-            success = False
+            ok = False
+            ssh_key = getattr(self.config, 'ssh_key', '')
             if ssh_key:
-                success = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key)
-            if not success:
-                success = self._ssh_run_command(node_ip, ssh_user, cmd)
-            if not success and ssh_password:
-                success = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, ssh_password)
+                ok = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key)
+            if not ok:
+                ok = self._ssh_run_command(node_ip, ssh_user, cmd)
+            if not ok and self.config.pass_:
+                ok = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, self.config.pass_)
 
-            if success:
+            if ok:
                 task.native_ha = True
                 task.status = 'completed'
                 task.total_vms = 0
                 task.migrated_vms = 0
-                self.logger.info(f"[MAINT] Native HA maintenance enabled for {node_name} - Proxmox will handle evacuation")
+                self.logger.info(f"[MAINT] native HA enabled for {node_name}, Proxmox handles the rest")
                 return True
-            else:
-                self.logger.warning(f"[MAINT] Native HA maintenance failed for {node_name}, falling back to custom evacuation")
-                return False
 
+            self.logger.warning(f"[MAINT] native HA failed for {node_name}, falling back")
+            return False
         except Exception as e:
-            self.logger.warning(f"[MAINT] Native HA maintenance error for {node_name}: {e}, falling back to custom evacuation")
+            self.logger.warning(f"[MAINT] native HA error on {node_name}: {e}")
             return False
 
     def _evacuate_node(self, node_name: str, task: MaintenanceTask):
@@ -1539,53 +1586,47 @@ class PegaProxManager:
             task.status = 'failed'
             task.error = str(e)
     
-    def exit_maintenance_mode(self, node_name: str) -> bool:
-        was_native_ha = False
+    def exit_maintenance_mode(self, node_name):
+        native = False
         with self.maintenance_lock:
-            if node_name in self.nodes_in_maintenance:
-                was_native_ha = self.nodes_in_maintenance[node_name].native_ha
-                del self.nodes_in_maintenance[node_name]
-                self.logger.info(f"[OK] Exited maintenance mode for node: {node_name}")
-            else:
+            if node_name not in self.nodes_in_maintenance:
                 return False
+            native = self.nodes_in_maintenance[node_name].native_ha
+            del self.nodes_in_maintenance[node_name]
+            self.logger.info(f"[OK] Exited maintenance mode for {node_name}")
 
-        # NS feb 2026 - disable native HA maintenance outside the lock (#78)
-        if was_native_ha:
+        if native:
             self._try_disable_native_ha_maintenance(node_name)
-
         return True
 
-    # NS feb 2026 - disable native HA maintenance mode (#78)
+    # NS: reverse of _try_native_ha_maintenance
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
             node_ip = self._get_node_ip(node_name)
             if not node_ip:
-                self.logger.warning(f"[MAINT] Cannot resolve IP for {node_name} to disable HA maintenance")
+                self.logger.warning(f"[MAINT] can't resolve {node_name} to disable HA maint")
                 return
 
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]
-            ssh_password = self.config.pass_
-            ssh_key = getattr(self.config, 'ssh_key', '')
-
+            ssh_user = (self.config.user or 'root').split('@')[0]
             cmd = f"ha-manager crm-command node-maintenance disable {node_name}"
 
-            success = False
+            ok = False
+            ssh_key = getattr(self.config, 'ssh_key', '')
             if ssh_key:
-                success = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key)
-            if not success:
-                success = self._ssh_run_command(node_ip, ssh_user, cmd)
-            if not success and ssh_password:
-                success = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, ssh_password)
+                ok = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key)
+            if not ok:
+                ok = self._ssh_run_command(node_ip, ssh_user, cmd)
+            if not ok and self.config.pass_:
+                ok = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, self.config.pass_)
 
-            if success:
-                self.logger.info(f"[MAINT] Native HA maintenance disabled for {node_name}")
+            if ok:
+                self.logger.info(f"[MAINT] disabled native HA maintenance for {node_name}")
             else:
-                self.logger.error(f"[MAINT] Failed to disable native HA maintenance for {node_name} - manual intervention may be needed")
-                self.logger.error(f"[MAINT] Fix: SSH to any cluster node and run: ha-manager crm-command node-maintenance disable {node_name}")
-
+                # MK: if SSH fails the user needs to do it manually
+                self.logger.error(f"[MAINT] couldn't disable HA maintenance for {node_name}")
+                self.logger.error(f"[MAINT] manual fix: ha-manager crm-command node-maintenance disable {node_name}")
         except Exception as e:
-            self.logger.error(f"[MAINT] Error disabling native HA maintenance for {node_name}: {e}")
+            self.logger.error(f"[MAINT] disable HA maint error {node_name}: {e}")
     
     def get_maintenance_status(self, node_name: str) -> Optional[Dict]:
         with self.maintenance_lock:
@@ -8780,6 +8821,65 @@ echo "AGENT_INSTALLED_OK"
                     return pool['poolid']
         return None
     
+    # NS: Mar 2026 - pool CRUD, was missing entirely somehow
+    def create_pool(self, poolid, comment=''):
+        if not self.is_connected and not self.connect_to_proxmox():
+            return {'success': False, 'error': 'Not connected'}
+        host = self.current_host or self.config.host
+        try:
+            payload = {'poolid': poolid}
+            if comment: payload['comment'] = comment
+            resp = self._api_post(f"https://{host}:8006/api2/json/pools", data=payload)
+            if resp.status_code == 200:
+                return {'success': True}
+            # proxmox gives us the error in 'errors' or just the body
+            err = resp.json().get('errors', resp.text) if resp.text else resp.status_code
+            return {'success': False, 'error': f'PVE {resp.status_code}: {err}'}
+        except Exception as e:
+            self.logger.error(f"create_pool: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def update_pool(self, poolid, comment='', members_to_add=None, members_to_remove=None):
+        """MK: update pool comment and/or members. Proxmox API is a bit weird here -
+        adding and removing members are separate PUT calls with 'delete' flag."""
+        if not self.is_connected and not self.connect_to_proxmox():
+            return {'success': False, 'error': 'Not connected'}
+        host = self.current_host or self.config.host
+        url = f"https://{host}:8006/api2/json/pools/{poolid}"
+        try:
+            data = {}
+            if comment is not None:
+                data['comment'] = comment
+            if members_to_add:
+                vms = [str(m) for m in members_to_add if isinstance(m, int) or str(m).isdigit()]
+                storages = [m for m in members_to_add if not str(m).isdigit()]
+                if vms: data['vms'] = ','.join(vms)
+                if storages: data['storage'] = ','.join(storages)
+            if members_to_remove:
+                data['delete'] = 1
+                vms = [str(m) for m in members_to_remove if isinstance(m, int) or str(m).isdigit()]
+                storages = [m for m in members_to_remove if not str(m).isdigit()]
+                if vms: data['vms'] = ','.join(vms)
+                if storages: data['storage'] = ','.join(storages)
+            resp = self._api_put(url, data=data)
+            if resp.status_code == 200:
+                return {'success': True}
+            return {'success': False, 'error': f'PVE {resp.status_code}'}
+        except Exception as e:
+            self.logger.error(f"update_pool({poolid}): {e}")
+            return {'success': False, 'error': str(e)}
+
+    def delete_pool(self, poolid):
+        if not self.is_connected and not self.connect_to_proxmox():
+            return {'success': False, 'error': 'Not connected'}
+        try:
+            host = self.current_host or self.config.host
+            resp = self._api_delete(f"https://{host}:8006/api2/json/pools/{poolid}")
+            return {'success': True} if resp.status_code == 200 else {'success': False, 'error': f'PVE {resp.status_code}'}
+        except Exception as e:
+            self.logger.error(f"delete_pool({poolid}): {e}")
+            return {'success': False, 'error': str(e)}
+
     def add_disk(self, node: str, vmid: int, vm_type: str, disk_config: Dict) -> Dict[str, Any]:
         """Add a new disk to VM or container
         
