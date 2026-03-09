@@ -237,6 +237,18 @@ def revert_node_network_api(cluster_id, node):
     return jsonify({'error': result['error']}), 500
 
 
+@bp.route('/api/clusters/<cluster_id>/networks', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_networks_api(cluster_id):
+    """NS: Mar 2026 - Cluster-wide network overview with VM assignments"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    return jsonify(mgr.get_cluster_networks())
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_node_dns_api(cluster_id, node):

@@ -1009,6 +1009,7 @@ class PegaProxDB:
                     retention INTEGER DEFAULT 3,
                     target_storage TEXT DEFAULT '',
                     target_bridge TEXT DEFAULT 'vmbr0',
+                    target_node TEXT DEFAULT '',
                     enabled INTEGER DEFAULT 1,
                     last_run TEXT,
                     last_status TEXT DEFAULT '',
@@ -1021,6 +1022,15 @@ class PegaProxDB:
             logging.info("Ensured cross_cluster_replications table exists")
         except Exception as e:
             logging.error(f"Error creating cross_cluster_replications table: {e}")
+
+        # NS: Mar 2026 - add target_node col for same-cluster snapshot replication (#103)
+        try:
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(cross_cluster_replications)").fetchall()]
+            if 'target_node' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN target_node TEXT DEFAULT ''")
+                logging.info("Added target_node column to cross_cluster_replications")
+        except Exception:
+            pass
 
         # NS: Feb 2026 - Space-efficient LVM COW snapshots managed by PegaProx
         try:

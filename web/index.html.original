@@ -1280,6 +1280,53 @@
         body[data-layout="corporate"] .rounded-full:not(.w-2):not(.w-1\.5):not(.h-2):not(.h-1\.5):not(.w-1):not(.h-1) {
             border-radius: 2px !important;
         }
+
+        /* LW: Mar 2026 - Content header strip (between tabs and content body) */
+        .corp-content-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 6px 16px; background: #22343c; border-bottom: 1px solid #485764;
+            font-size: 13px; min-height: 32px;
+        }
+        .corp-content-header .corp-header-title { color: #e9ecef; font-weight: 500; font-size: 14px; }
+
+        /* Corporate VM/resource table toolbar */
+        .corp-vm-toolbar {
+            display: flex; align-items: center; padding: 4px 8px;
+            border-bottom: 1px solid #37474f; gap: 4px; background: transparent;
+        }
+        .corp-toolbar-divider { display: inline-block; width: 1px; height: 16px; background: #485764; margin: 0 4px; flex-shrink: 0; }
+        .corp-toolbar-filter { padding: 2px 8px; font-size: 12px; color: #728b9a; background: none; border: none; cursor: pointer; font-family: inherit; }
+        .corp-toolbar-filter:hover { color: #adbbc4; }
+        .corp-toolbar-filter.active { color: #e9ecef; border-bottom: 2px solid #49afd9; }
+
+        /* NS: Status bar - bottom of page */
+        .corp-status-bar {
+            position: fixed; bottom: 0; left: 0; right: 0; height: 24px; z-index: 40;
+            background: #0F171C; border-top: 1px solid #485764;
+            display: flex; align-items: center; padding: 0 12px;
+            font-size: 11px; color: #728b9a;
+        }
+        .corp-status-bar-item {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 0 8px; border-right: 1px solid #37474f; height: 100%;
+        }
+        .corp-status-bar-item:last-child { border-right: none; }
+
+        /* Recent items in sidebar */
+        .corp-recent-item {
+            display: flex; align-items: center; gap: 6px;
+            padding: 3px 8px; font-size: 12px; color: #adbbc4;
+            cursor: pointer; border: none; background: none; width: 100%; text-align: left;
+        }
+        .corp-recent-item:hover { background: #29414e; color: #e9ecef; }
+
+        /* Striped datagrid variant */
+        body[data-layout="corporate"] .corp-datagrid-striped tbody tr:nth-child(even) td { background: rgba(34,52,60,0.5); }
+        body[data-layout="corporate"] .corp-datagrid-striped tbody tr:nth-child(even):hover td { background: #29414e; }
+
+        /* Tab strip background */
+        body[data-layout="corporate"] .corp-tab-strip { background: #1b2a32; }
+        body[data-layout="corporate"] .corp-tab-strip button:hover { border-bottom-color: #728b9a; }
     </style>
 </head>
 <body class="dark notranslate">

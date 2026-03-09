@@ -53,6 +53,7 @@ SRC_FILES=(
     datacenter.js
     security.js
     storage.js
+    networking.js
     tables.js
     vm_modals.js
     vm_config.js

@@ -775,7 +775,7 @@ def main(debug_mode=False):
 
     if use_gevent == 'gevent' or (use_gevent == 'auto' and GEVENT_AVAILABLE):
         if GEVENT_AVAILABLE:
-            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers)
+            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port)
             return
 
     # Fallback to Flask development server
@@ -958,7 +958,7 @@ def _create_listener(bind_host, port_num):
         return (bind_host, port_num)
 
 
-def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
+def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port=-1):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
 
@@ -1214,12 +1214,21 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_ctx.load_cert_chain(ssl_context[0], ssl_context[1])
-        http_server = DualProtocolWSGIServer(
-            _create_listener(bind_host, port), app,
-            ssl_context=ssl_ctx,
-            redirect_domain=domain,
-            **server_kwargs
-        )
+        # NS: http_redirect_port == -1 disables ALL http→https redirect (#125)
+        # including the dual-protocol detection on the main port
+        if http_redirect_port < 0:
+            http_server = QuietWSGIServer(
+                _create_listener(bind_host, port), app,
+                ssl_context=ssl_ctx,
+                **server_kwargs
+            )
+        else:
+            http_server = DualProtocolWSGIServer(
+                _create_listener(bind_host, port), app,
+                ssl_context=ssl_ctx,
+                redirect_domain=domain,
+                **server_kwargs
+            )
     else:
         print(f"HTTP on http://{bind_host}:{port}", flush=True)
         print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)

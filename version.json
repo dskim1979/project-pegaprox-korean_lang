@@ -1,7 +1,7 @@
 {
-    "version": "0.9.1",
-    "build": "2026.03.08",
-    "release_date": "2026-03-08",
+    "version": "0.9.1.1",
+    "build": "2026.03.10",
+    "release_date": "2026-03-10",
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
     "update_archive": "https://github.com/PegaProx/project-pegaprox/archive/refs/heads/main.tar.gz",
@@ -145,6 +145,7 @@
         "web/src/dashboard.js",
         "web/src/datacenter.js",
         "web/src/icons.js",
+        "web/src/networking.js",
         "web/src/node_modals.js",
         "web/src/security.js",
         "web/src/settings_modal.js",
@@ -156,13 +157,13 @@
         "web/src/vm_modals.js"
     ],
     "changelog": [
-        "XCP-ng / Xen hypervisor integration (Tech Preview)",
-        "XCP-ng VM power actions, VNC console, disk/network/CD-ROM management",
-        "XCP-ng node details, maintenance mode, storage uploads",
-        "ACME / Let's Encrypt auto-renewal for SSL certificates",
-        "Ceph RBD mirroring support with pool-level configuration",
-        "Nginx reverse proxy example configuration",
-        "offline operation + datastore uploads (#118, #119)"
+        "Snapshot-based replication for non-ZFS clusters (#103)",
+        "CVE / package vulnerability scanner per node",
+        "Cluster-wide network overview with VM assignments",
+        "Node time/timezone configuration",
+        "Language preference persistence across devices",
+        "Fix cross-cluster migration node dropdown race condition",
+        "Fix local replication exception handler variable scope"
     ],
     "breaking_changes": []
 }

@@ -3,7 +3,7 @@
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
         // Datastore Tab Component - with Storage Clusters for balancing
-        function DatastoreTab({ clusterId, addToast, initialStorage }) {
+        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin } = useAuth();
             const [loading, setLoading] = useState(true);
@@ -186,14 +186,22 @@
             }, [clusterId]);
 
             // LW: Mar 2026 - auto-select storage from sidebar click
+            // initialNode disambiguates when multiple nodes have same storage name (e.g. "local")
             useEffect(() => {
                 if (!initialStorage || !initialLoadDone.current) return;
-                // find it in shared or local
+                // if node is specified, go directly to that node's storage
+                if (initialNode) {
+                    const nodeStores = datastores.local?.[initialNode];
+                    if (nodeStores?.some(s => s.storage === initialStorage)) {
+                        loadStorageContent(initialStorage, initialNode);
+                        return;
+                    }
+                }
+                // fallback: check shared first, then scan local
                 const found = datastores.shared?.find(s => s.storage === initialStorage);
                 if (found) {
                     loadStorageContent(initialStorage, null);
                 } else {
-                    // check local storages per node
                     for (const [node, stores] of Object.entries(datastores.local || {})) {
                         if (stores.some(s => s.storage === initialStorage)) {
                             loadStorageContent(initialStorage, node);
@@ -201,7 +209,7 @@
                         }
                     }
                 }
-            }, [initialStorage, datastores]);
+            }, [initialStorage, initialNode, datastores]);
 
             const fetchDatastores = async () => {
                 // prevent concurrent fetches

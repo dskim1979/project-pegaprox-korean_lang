@@ -1526,8 +1526,20 @@
                                             <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                 <h4 className="font-medium text-white mb-3">{t('time') || 'Time'}</h4>
                                                 <div className="grid grid-cols-2 gap-4 text-sm">
-                                                    <div><span className="text-gray-400">{t('timezone') || 'Timezone'}:</span><span className="ml-2 text-white">{data.time?.timezone || 'UTC'}</span></div>
-                                                    <div><span className="text-gray-400">{t('localTime') || 'Local Time'}:</span><span className="ml-2 text-white font-mono">{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString() : 'N/A'}</span></div>
+                                                    <div>
+                                                        <span className="text-gray-400">{t('timezone') || 'Timezone'}:</span>
+                                                        <select
+                                                            value={data.time?.timezone || 'UTC'}
+                                                            onChange={async (e) => {
+                                                                const tz = e.target.value;
+                                                                handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'));
+                                                            }}
+                                                            className="ml-2 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-sm"
+                                                        >
+                                                            {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                                                        </select>
+                                                    </div>
+                                                    <div><span className="text-gray-400">{t('localTime') || 'Local Time'}:</span><span className="ml-2 text-white font-mono">{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : 'N/A'}</span></div>
                                                 </div>
                                             </div>
 
@@ -3106,7 +3118,8 @@
                             </button>
                             <Icons.Server className="w-4 h-4" style={{color: nodeOnline ? '#49afd9' : '#f54f47'}} />
                             <span className="text-[14px] font-medium" style={{color: '#e9ecef'}}>{node}</span>
-                            <span className={`corp-badge ${nodeOnline ? (isMaint ? 'corp-badge-maintenance' : 'corp-badge-online') : 'corp-badge-offline'}`}>
+                            <span className={`corp-badge flex items-center gap-1 ${nodeOnline ? (isMaint ? 'corp-badge-maintenance' : 'corp-badge-online') : 'corp-badge-offline'}`}>
+                                {isMaint && <Icons.Wrench className="w-3 h-3" />}
                                 {isMaint ? t('maintenance') : nodeOnline ? t('online') : t('offline')}
                             </span>
                         </div>
@@ -3166,7 +3179,7 @@
                                     </div>
                                     <table className="corp-property-grid">
                                         <tbody>
-                                            <tr><td>{t('status')}</td><td className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{background: nodeOnline ? '#60b515' : '#f54f47'}}></span> {isMaint ? t('maintenance') : nodeOnline ? t('online') : t('offline')}</td></tr>
+                                            <tr><td>{t('status')}</td><td className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{background: isMaint ? '#efc006' : nodeOnline ? '#60b515' : '#f54f47'}}></span>{isMaint && <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} />} {isMaint ? t('maintenance') : nodeOnline ? t('online') : t('offline')}</td></tr>
                                             <tr><td>{t('pveVersion')}</td><td>{data.summary?.pveversion || metrics.pveversion || '-'}</td></tr>
                                             <tr><td>{t('kernelVersion')}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.summary?.kversion || '-'}</td></tr>
                                             <tr><td>{t('cpuModel')}</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
@@ -3623,9 +3636,24 @@
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('timeConfig')}</span>
                                                     <table className="corp-property-grid">
                                                         <tbody>
-                                                            <tr><td>Timezone</td><td>{data.time?.timezone || '-'}</td></tr>
-                                                            <tr><td>Local Time</td><td>{data.time?.localtime || '-'}</td></tr>
-                                                            <tr><td>UTC Time</td><td>{data.time?.utctime || '-'}</td></tr>
+                                                            <tr>
+                                                                <td>Timezone</td>
+                                                                <td>
+                                                                    <select
+                                                                        value={data.time?.timezone || 'UTC'}
+                                                                        onChange={async (e) => {
+                                                                            const tz = e.target.value;
+                                                                            handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'));
+                                                                        }}
+                                                                        className="px-2 py-0.5 text-[13px] bg-transparent border rounded text-white"
+                                                                        style={{borderColor: '#485764'}}
+                                                                    >
+                                                                        {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                                                                    </select>
+                                                                </td>
+                                                            </tr>
+                                                            <tr><td>Local Time</td><td>{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
+                                                            <tr><td>UTC Time</td><td>{data.time?.time ? new Date(data.time.time * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
                                                         </tbody>
                                                     </table>
                                                 </div>

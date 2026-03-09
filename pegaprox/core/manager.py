@@ -783,14 +783,23 @@ class PegaProxManager:
                     results = [fetch_node_details(node) for node in nodes]
                 
                 # NS Mar 2026 - sync native HA maintenance state (#78)
-                # dragon2611 reported LB migrating VMs back onto nodes going into
-                # proxmox-native maintenance. We poll /cluster/ha/status/current here
-                # and inject synthetic MaintenanceTask objects so the rest of the code
-                # treats them the same as our own maintenance mode.
+                # Detect nodes in Proxmox-native maintenance from /nodes response
+                # AND from /cluster/ha/status/current (some PVE versions only report
+                # maintenance in one of the two endpoints)
+                native_ha_nodes = set()
+
+                # Method 1: check node status from /nodes (most reliable, no extra perms)
+                for node in nodes:
+                    if node.get('status') == 'maintenance':
+                        native_ha_nodes.add(node['node'])
+
+                # Method 2: HA status endpoint (catches cases where /nodes still says "online"
+                # during early maintenance transition) - may fail with 401 on limited tokens
                 try:
-                    native_ha_nodes = self._get_native_ha_maintenance_nodes()
+                    ha_nodes = self._get_native_ha_maintenance_nodes()
+                    native_ha_nodes.update(ha_nodes)
                 except Exception:
-                    native_ha_nodes = set()
+                    pass
 
                 for nm in native_ha_nodes:
                     if nm not in self.nodes_in_maintenance:
@@ -1464,20 +1473,31 @@ class PegaProxManager:
             host = self.current_host or self.config.host
             resp = self._api_get(f"https://{host}:8006/api2/json/cluster/ha/status/current")
             if resp.status_code != 200:
+                self.logger.debug(f"[MAINT] HA status endpoint returned {resp.status_code}")
                 return set()
 
+            data = resp.json().get('data', [])
             result = set()
-            for entry in resp.json().get('data', []):
+            for entry in data:
+                # type=node entries (PVE 8.x with HA resources)
                 if entry.get('type') == 'node' and entry.get('status') == 'maintenance':
                     result.add(entry.get('node', ''))
+                # manager_status entry (always present when HA is active)
                 elif entry.get('id') == 'manager_status':
                     # "pve1 master\npve2 maintenance\npve3 online\n"
                     for line in entry.get('status', '').split('\n'):
                         parts = line.strip().split()
                         if len(parts) >= 2 and parts[1] == 'maintenance':
                             result.add(parts[0])
+                # NS: some PVE versions use quorum/manager with "node" field
+                elif entry.get('status') == 'maintenance' and entry.get('node'):
+                    result.add(entry['node'])
+
+            if result:
+                self.logger.debug(f"[MAINT] HA poll found maintenance nodes: {result}")
             return result
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"[MAINT] HA status poll failed: {e}")
             return set()
 
     # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
@@ -1490,8 +1510,10 @@ class PegaProxManager:
                 return False
 
             ssh_user = (self.config.user or 'root').split('@')[0]
-            cmd = f"ha-manager crm-command node-maintenance enable {node_name}"
-            self.logger.info(f"[MAINT] Trying native HA for {node_name}")
+            # non-root PAM users need sudo for ha-manager
+            prefix = "sudo " if ssh_user != 'root' else ""
+            cmd = f"{prefix}ha-manager crm-command node-maintenance enable {node_name}"
+            self.logger.info(f"[MAINT] Trying native HA for {node_name} (user={ssh_user})")
 
             ok = False
             ssh_key = getattr(self.config, 'ssh_key', '')
@@ -1608,7 +1630,8 @@ class PegaProxManager:
                 return
 
             ssh_user = (self.config.user or 'root').split('@')[0]
-            cmd = f"ha-manager crm-command node-maintenance disable {node_name}"
+            prefix = "sudo " if ssh_user != 'root' else ""
+            cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
 
             ok = False
             ssh_key = getattr(self.config, 'ssh_key', '')
@@ -1624,7 +1647,7 @@ class PegaProxManager:
             else:
                 # MK: if SSH fails the user needs to do it manually
                 self.logger.error(f"[MAINT] couldn't disable HA maintenance for {node_name}")
-                self.logger.error(f"[MAINT] manual fix: ha-manager crm-command node-maintenance disable {node_name}")
+                self.logger.error(f"[MAINT] manual fix: sudo ha-manager crm-command node-maintenance disable {node_name}")
         except Exception as e:
             self.logger.error(f"[MAINT] disable HA maint error {node_name}: {e}")
     
@@ -8746,6 +8769,132 @@ echo "AGENT_INSTALLED_OK"
             logging.error(f"Error getting network list: {e}")
             return []
 
+    # NS: Mar 2026 - cluster-wide network overview (corporate layout)
+    def get_cluster_networks(self) -> Dict[str, Any]:
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'networks': []}
+
+        try:
+            host = self.current_host or self.config.host
+
+            # get online nodes
+            nodes_url = f"https://{host}:8006/api2/json/nodes"
+            nodes_resp = self._api_get(nodes_url)
+            if nodes_resp.status_code != 200:
+                return {'networks': []}
+
+            online_nodes = [n['node'] for n in nodes_resp.json().get('data', [])
+                           if n.get('status') == 'online']
+
+            # get VMs from cluster resources
+            res_url = f"https://{host}:8006/api2/json/cluster/resources?type=vm"
+            res_resp = self._api_get(res_url)
+            all_vms = res_resp.json().get('data', []) if res_resp.status_code == 200 else []
+
+            vms_by_node = {}
+            for vm in all_vms:
+                vms_by_node.setdefault(vm.get('node'), []).append(vm)
+
+            # fetch network configs + VM configs concurrently per node
+            def fetch_node(node):
+                net_data = []
+                vm_bridges = []
+
+                # node network interfaces
+                try:
+                    net_url = f"https://{host}:8006/api2/json/nodes/{node}/network"
+                    r = self._api_get(net_url)
+                    if r.status_code == 200:
+                        net_data = r.json().get('data', [])
+                except:
+                    pass
+
+                # VM configs on this node - extract bridge assignments
+                for vm in vms_by_node.get(node, []):
+                    vmid = vm.get('vmid')
+                    if not vmid:
+                        continue
+                    vtype = 'qemu' if vm.get('type') == 'qemu' else 'lxc'
+                    try:
+                        cfg_url = f"https://{host}:8006/api2/json/nodes/{node}/{vtype}/{vmid}/config"
+                        cr = self._api_get(cfg_url)
+                        if cr.status_code != 200:
+                            continue
+                        cfg = cr.json().get('data', {})
+                        for key, val in cfg.items():
+                            if not key.startswith('net') or not isinstance(val, str):
+                                continue
+                            if not key[3:].isdigit():
+                                continue
+                            bridge = None
+                            for part in val.split(','):
+                                if part.startswith('bridge='):
+                                    bridge = part.split('=', 1)[1]
+                                    break
+                            if bridge:
+                                vm_bridges.append({
+                                    'vmid': vmid,
+                                    'name': vm.get('name', ''),
+                                    'node': node,
+                                    'status': vm.get('status', 'unknown'),
+                                    'type': vm.get('type', 'qemu'),
+                                    'iface': key,
+                                    'bridge': bridge,
+                                })
+                    except Exception:
+                        pass
+
+                return node, net_data, vm_bridges
+
+            tasks = [lambda n=node: fetch_node(n) for n in online_nodes]
+            results = run_concurrent(tasks, timeout=15)
+
+            network_map = {}
+            for res in results:
+                if not res:
+                    continue
+                node, ifaces, vm_bridges = res
+
+                for iface in ifaces:
+                    itype = iface.get('type', '')
+                    if itype not in ('bridge', 'OVSBridge'):
+                        continue
+                    name = iface.get('iface', '')
+                    if not name:
+                        continue
+                    if name not in network_map:
+                        network_map[name] = {
+                            'name': name, 'type': itype,
+                            'cidr': iface.get('cidr', ''),
+                            'address': iface.get('address', ''),
+                            'gateway': iface.get('gateway', ''),
+                            'bridge_ports': iface.get('bridge_ports', ''),
+                            'comments': iface.get('comments', ''),
+                            'autostart': iface.get('autostart', 0),
+                            'active': iface.get('active', 0),
+                            'nodes': [], 'vms': [],
+                        }
+                    network_map[name]['nodes'].append(node)
+
+                for vb in vm_bridges:
+                    br = vb.pop('bridge')
+                    if br not in network_map:
+                        # bridge discovered from VM config only
+                        network_map[br] = {
+                            'name': br, 'type': 'bridge',
+                            'cidr': '', 'address': '', 'gateway': '',
+                            'bridge_ports': '', 'comments': '',
+                            'autostart': 0, 'active': 1,
+                            'nodes': [], 'vms': [],
+                        }
+                    network_map[br]['vms'].append(vb)
+
+            return {'networks': sorted(network_map.values(), key=lambda n: n['name'])}
+        except Exception as e:
+            logging.error(f"get_cluster_networks failed: {e}")
+            return {'networks': []}
+
     def get_iso_list(self, node: str, storage: str = None) -> List[Dict]:
         
         if not self.is_connected:
@@ -10570,6 +10719,549 @@ echo "AGENT_INSTALLED_OK"
         except:
             return False
     
+    # =====================================================
+    # CVE / PACKAGE VULNERABILITY SCANNER
+    # MK Mar 2026 - SSH-based node security scanning
+    # =====================================================
+
+    def _ssh_node_output(self, node_name, cmd, timeout=60):
+        """Run command on a node, tries all available SSH auth methods.
+        Returns stdout string or None."""
+        node_ip = self._get_node_ip(node_name)
+        if not node_ip:
+            return None
+
+        ssh_user = (self.config.user or 'root').split('@')[0]
+        # non-root users need sudo for package queries
+        if ssh_user != 'root':
+            cmd = f"sudo {cmd}"
+
+        ssh_key = getattr(self.config, 'ssh_key', '')
+        if ssh_key:
+            out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, timeout=timeout)
+            if out is not None:
+                return out
+
+        out = self._ssh_run_command_output(node_ip, ssh_user, cmd, timeout=timeout)
+        if out is not None:
+            return out
+
+        if self.config.pass_:
+            out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, self.config.pass_, timeout=timeout)
+            if out is not None:
+                return out
+
+        return None
+
+    def scan_node_packages(self, node_name):
+        """Scan node for CVEs and outdated packages via SSH.
+
+        Uses debsecan for real CVE-to-package mapping if available,
+        falls back to apt-get upgrade simulation otherwise.
+        """
+        # NS: one big command block to avoid multiple SSH roundtrips
+        scan_cmd = (
+            "echo '---OS---' && cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|VERSION_ID)=' ; "
+            "echo '---KERNEL---' && uname -r ; "
+            "echo '---PVE---' && pveversion 2>/dev/null || echo 'N/A' ; "
+            "echo '---REBOOT---' && test -f /var/run/reboot-required && echo 'yes' || echo 'no' ; "
+            "echo '---DEBSECAN---' && "
+            "if command -v debsecan >/dev/null 2>&1; then "
+            "  debsecan --suite $(lsb_release -cs 2>/dev/null || echo bookworm) --only-fixed 2>/dev/null | head -500 ; "
+            "else echo 'NOT_INSTALLED'; fi ; "
+            "echo '---UPDATES---' && apt-get -s dist-upgrade 2>/dev/null | grep '^Inst' ; "
+            "echo '---END---'"
+        )
+
+        output = self._ssh_node_output(node_name, scan_cmd, timeout=120)
+        if not output:
+            return {'error': 'SSH connection failed', 'node': node_name}
+
+        result = {
+            'node': node_name,
+            'timestamp': datetime.now().isoformat(),
+            'os': '', 'kernel': '', 'pve_version': '',
+            'reboot_required': False,
+            'debsecan_available': False,
+            'cves': [],           # real CVE entries from debsecan
+            'packages': [],       # pending updates from apt
+            'cve_count': 0,
+            'security_count': 0, 'total_count': 0
+        }
+
+        section = None
+        for line in output.strip().split('\n'):
+            line = line.strip()
+            if line.startswith('---') and line.endswith('---'):
+                section = line.strip('-')
+                continue
+
+            if section == 'OS':
+                if line.startswith('PRETTY_NAME='):
+                    result['os'] = line.split('=', 1)[1].strip('"')
+            elif section == 'KERNEL':
+                if line and not line.startswith('---'):
+                    result['kernel'] = line
+            elif section == 'PVE':
+                if line and line != 'N/A':
+                    result['pve_version'] = line
+            elif section == 'REBOOT':
+                result['reboot_required'] = line.strip() == 'yes'
+            elif section == 'DEBSECAN':
+                if line == 'NOT_INSTALLED':
+                    result['debsecan_available'] = False
+                elif line.startswith('CVE-'):
+                    result['debsecan_available'] = True
+                    # default format: "CVE-2024-1234 package urgency (status info)"
+                    # e.g. "CVE-2023-31484 perl low (LTS: 5.36.0-7+deb12u2)"
+                    cve_parts = line.split()
+                    if len(cve_parts) >= 3:
+                        cve_id = cve_parts[0]
+                        pkg_name = cve_parts[1]
+                        urgency_raw = cve_parts[2].lower()
+                        # rest is status info in parens
+                        status = ' '.join(cve_parts[3:]).strip('()')
+
+                        urgency = 'medium'
+                        if urgency_raw in ('high', 'medium**'):
+                            urgency = 'high'
+                        elif urgency_raw in ('low', 'unimportant'):
+                            urgency = 'low'
+
+                        if not any(c['cve'] == cve_id and c['package'] == pkg_name for c in result['cves']):
+                            result['cves'].append({
+                                'cve': cve_id,
+                                'package': pkg_name,
+                                'urgency': urgency,
+                                'status': status,
+                            })
+            elif section == 'UPDATES' and line.startswith('Inst '):
+                parts = line.split(' ', 2)
+                pkg = parts[1] if len(parts) > 1 else '?'
+                rest = parts[2] if len(parts) > 2 else ''
+
+                current_ver = ''
+                new_ver = ''
+                source = ''
+                is_security = 'security' in rest.lower()
+
+                if '[' in rest and ']' in rest:
+                    current_ver = rest[rest.index('[') + 1:rest.index(']')]
+                if '(' in rest and ')' in rest:
+                    paren = rest[rest.index('(') + 1:rest.index(')')]
+                    pp = paren.split(' ', 1)
+                    new_ver = pp[0]
+                    source = pp[1] if len(pp) > 1 else ''
+
+                severity = 'critical' if is_security and any(
+                    k in pkg for k in ('kernel', 'openssl', 'libssl', 'openssh', 'sudo', 'glibc', 'libc6')
+                ) else 'security' if is_security else 'normal'
+
+                result['packages'].append({
+                    'name': pkg, 'current': current_ver,
+                    'available': new_ver, 'source': source,
+                    'security': is_security, 'severity': severity
+                })
+
+        result['cve_count'] = len(result['cves'])
+        result['total_count'] = len(result['packages'])
+        result['security_count'] = sum(1 for p in result['packages'] if p['security'])
+        return result
+
+    # CIS hardening checks - MK Mar 2026
+    # each key maps to a shell snippet that returns 0 if already hardened
+    CIS_CHECKS = {
+        'fs_modules': {
+            'check': "lsmod | grep -qE '^(cramfs|freevxfs|hfs|hfsplus|jffs2) ' && echo FAIL || echo OK",
+            'apply': """for mod in cramfs freevxfs hfs hfsplus jffs2; do
+echo "install $mod /bin/true" > /etc/modprobe.d/cis-$mod.conf
+rmmod $mod 2>/dev/null || true
+done
+echo DONE""",
+        },
+        'core_dumps': {
+            'check': """grep -q 'hard.*core.*0' /etc/security/limits.d/*cis* 2>/dev/null && \
+sysctl fs.suid_dumpable 2>/dev/null | grep -q '= 0' && echo OK || echo FAIL""",
+            'apply': """echo '* hard core 0' > /etc/security/limits.d/cis-coredump.conf
+echo 'fs.suid_dumpable = 0' > /etc/sysctl.d/60-cis-coredump.conf
+sysctl -w fs.suid_dumpable=0 >/dev/null
+echo DONE""",
+        },
+        'mount_options': {
+            'check': """mount | grep ' /tmp ' | grep -q noexec && \
+mount | grep ' /dev/shm ' | grep -q nosuid && echo OK || echo FAIL""",
+            'apply': """# NS: need to handle missing fstab entries, don't brick the box
+cp /etc/fstab /etc/fstab.bak.cis
+for mp in /tmp /var/tmp /dev/shm; do
+  if grep -q " $mp " /etc/fstab; then
+    sed -i "s|\\( $mp .*\\)defaults|\\1defaults,nodev,nosuid,noexec|" /etc/fstab
+  elif [ "$mp" = "/dev/shm" ]; then
+    echo "tmpfs $mp tmpfs defaults,nodev,nosuid,noexec 0 0" >> /etc/fstab
+  fi
+done
+mount -o remount /tmp 2>/dev/null; mount -o remount /dev/shm 2>/dev/null; mount -o remount /var/tmp 2>/dev/null
+echo DONE""",
+        },
+        'cron_hardening': {
+            'check': """stat -c '%a' /etc/crontab 2>/dev/null | grep -q '600' && \
+[ ! -f /etc/cron.deny ] && echo OK || echo FAIL""",
+            'apply': """chmod 600 /etc/crontab
+chmod 700 /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.monthly /etc/cron.weekly 2>/dev/null
+rm -f /etc/cron.deny /etc/at.deny
+touch /etc/cron.allow /etc/at.allow
+chmod 600 /etc/cron.allow /etc/at.allow
+chown root:root /etc/cron.allow /etc/at.allow
+echo DONE""",
+        },
+        'net_protocols': {
+            'check': "lsmod | grep -qE '^(dccp|sctp|rds|tipc) ' && echo FAIL || echo OK",
+            'apply': """for proto in dccp sctp rds tipc; do
+echo "install $proto /bin/true" > /etc/modprobe.d/cis-$proto.conf
+rmmod $proto 2>/dev/null || true
+done
+echo DONE""",
+        },
+        'journald': {
+            'check': """journalctl --disk-usage >/dev/null 2>&1 && \
+grep -q 'Storage=persistent' /etc/systemd/journald.conf 2>/dev/null && \
+grep -q 'Compress=yes' /etc/systemd/journald.conf 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """mkdir -p /var/log/journal
+sed -i 's/^#\\?Storage=.*/Storage=persistent/' /etc/systemd/journald.conf
+sed -i 's/^#\\?Compress=.*/Compress=yes/' /etc/systemd/journald.conf
+sed -i 's/^#\\?ForwardToSyslog=.*/ForwardToSyslog=yes/' /etc/systemd/journald.conf
+systemctl restart systemd-journald
+echo DONE""",
+        },
+        'ssh_perms': {
+            'check': """[ "$(stat -c '%a' /etc/ssh/sshd_config 2>/dev/null)" = "600" ] && echo OK || echo FAIL""",
+            'apply': """chmod 600 /etc/ssh/sshd_config
+find /etc/ssh -name 'ssh_host_*_key' -exec chmod 600 {} \\;
+find /etc/ssh -name 'ssh_host_*_key.pub' -exec chmod 644 {} \\;
+chown root:root /etc/ssh/sshd_config
+echo DONE""",
+        },
+        'ssh_crypto': {
+            # LW: only check if our cis config drop-in exists
+            'check': """[ -f /etc/ssh/sshd_config.d/cis-hardening.conf ] && echo OK || echo FAIL""",
+            'apply': """cat > /etc/ssh/sshd_config.d/cis-hardening.conf << 'SSHEOF'
+# CIS SSH Hardening - applied by PegaProx
+Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+GSSAPIAuthentication no
+HostbasedAuthentication no
+IgnoreRhosts yes
+PermitEmptyPasswords no
+MaxAuthTries 4
+LoginGraceTime 60
+ClientAliveInterval 300
+ClientAliveCountMax 3
+SSHEOF
+if [ -d /etc/ssh/sshd_config.d ]; then
+  grep -q 'Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config 2>/dev/null || echo 'Include /etc/ssh/sshd_config.d/*.conf' >> /etc/ssh/sshd_config
+fi
+sshd -t 2>/dev/null && systemctl reload sshd
+echo DONE""",
+        },
+        'pam_faillock': {
+            'check': """grep -q 'pam_faillock' /etc/pam.d/common-auth 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """apt-get install -y libpam-modules >/dev/null 2>&1
+if ! grep -q pam_faillock /etc/pam.d/common-auth 2>/dev/null; then
+  cp /etc/pam.d/common-auth /etc/pam.d/common-auth.bak.cis
+  sed -i '/pam_unix.so/i auth    required    pam_faillock.so preauth silent deny=5 unlock_time=600 even_deny_root_account' /etc/pam.d/common-auth
+  sed -i '/pam_unix.so/a auth    [default=die]    pam_faillock.so authfail deny=5 unlock_time=600 even_deny_root_account' /etc/pam.d/common-auth
+fi
+echo DONE""",
+        },
+        'shell_timeout': {
+            'check': """grep -q 'TMOUT=900' /etc/profile.d/cis-timeout.sh 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """cat > /etc/profile.d/cis-timeout.sh << 'TMEOF'
+# CIS 5.4.3.2 - shell timeout
+readonly TMOUT=900
+export TMOUT
+TMEOF
+chmod 644 /etc/profile.d/cis-timeout.sh
+echo DONE""",
+        },
+        'file_perms': {
+            'check': """[ "$(stat -c '%a' /etc/shadow 2>/dev/null)" = "640" ] || [ "$(stat -c '%a' /etc/shadow 2>/dev/null)" = "600" ] && \
+[ "$(stat -c '%a' /etc/gshadow 2>/dev/null)" = "640" ] || [ "$(stat -c '%a' /etc/gshadow 2>/dev/null)" = "600" ] && echo OK || echo FAIL""",
+            'apply': """chmod 644 /etc/passwd /etc/group
+chmod 640 /etc/shadow /etc/gshadow
+chown root:root /etc/passwd /etc/group
+chown root:shadow /etc/shadow /etc/gshadow
+echo DONE""",
+        },
+        # ---- Lynis recommendations below - NS Mar 2026 ----
+        'backup_dns': {
+            'check': """ns_count=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null); [ "$ns_count" -ge 2 ] && echo OK || echo FAIL""",
+            'apply': """if ! grep -q '1.1.1.1' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 2 ]; then
+echo 'nameserver 1.1.1.1' >> /etc/resolv.conf
+fi
+if ! grep -q '9.9.9.9' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 3 ]; then
+echo 'nameserver 9.9.9.9' >> /etc/resolv.conf
+fi
+echo DONE""",
+        },
+        'postfix_banner': {
+            'check': """if command -v postconf >/dev/null 2>&1; then
+postconf smtpd_banner 2>/dev/null | grep -qv 'ESMTP' && echo OK || echo FAIL
+else echo OK; fi""",
+            'apply': """if command -v postconf >/dev/null 2>&1; then
+postconf -e 'smtpd_banner = $myhostname ESMTP'
+systemctl reload postfix 2>/dev/null
+fi
+echo DONE""",
+        },
+        'pw_hash_rounds': {
+            'check': """grep -q '^SHA_CRYPT_MIN_ROUNDS' /etc/login.defs 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """if ! grep -q '^SHA_CRYPT_MIN_ROUNDS' /etc/login.defs; then
+echo 'SHA_CRYPT_MIN_ROUNDS 5000' >> /etc/login.defs
+echo 'SHA_CRYPT_MAX_ROUNDS 500000' >> /etc/login.defs
+fi
+echo DONE""",
+        },
+        'pw_quality': {
+            'check': """dpkg -l libpam-pwquality 2>/dev/null | grep -q '^ii' && echo OK || echo FAIL""",
+            'apply': """apt-get install -y libpam-pwquality >/dev/null 2>&1
+cat > /etc/security/pwquality.conf << 'PWEOF'
+minlen = 12
+dcredit = -1
+ucredit = -1
+lcredit = -1
+ocredit = -1
+PWEOF
+echo DONE""",
+        },
+        'pw_aging': {
+            'check': """grep -q '^PASS_MAX_DAYS.*365' /etc/login.defs 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   365/' /etc/login.defs
+sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   1/' /etc/login.defs
+sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/' /etc/login.defs
+echo DONE""",
+        },
+        'default_umask': {
+            'check': """grep -qE '^UMASK\\s+027' /etc/login.defs 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """sed -i 's/^UMASK.*/UMASK           027/' /etc/login.defs
+echo 'umask 027' > /etc/profile.d/hardened-umask.sh
+chmod 644 /etc/profile.d/hardened-umask.sh
+echo DONE""",
+        },
+        'pkg_cleanup': {
+            # check if any removed-but-not-purged packages exist
+            'check': """dpkg -l | grep -q '^rc' && echo FAIL || echo OK""",
+            'apply': """dpkg -l | grep '^rc' | awk '{print $2}' | xargs dpkg --purge 2>/dev/null
+echo DONE""",
+        },
+        'debsums': {
+            'check': """command -v debsums >/dev/null 2>&1 && echo OK || echo FAIL""",
+            'apply': """apt-get install -y debsums >/dev/null 2>&1
+echo DONE""",
+        },
+        'login_banners': {
+            'check': """[ -s /etc/issue ] && grep -qi 'authorized' /etc/issue 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """BANNER='Authorized uses only. All activity may be monitored and reported.'
+echo "$BANNER" > /etc/issue
+echo "$BANNER" > /etc/issue.net
+echo DONE""",
+        },
+        'file_integrity': {
+            'check': """command -v aide >/dev/null 2>&1 && echo OK || echo FAIL""",
+            'apply': """DEBIAN_FRONTEND=noninteractive apt-get install -y aide >/dev/null 2>&1
+aideinit 2>/dev/null &
+echo DONE""",
+        },
+        'process_acct': {
+            'check': """command -v lastcomm >/dev/null 2>&1 && echo OK || echo FAIL""",
+            'apply': """apt-get install -y acct >/dev/null 2>&1
+systemctl enable acct 2>/dev/null; systemctl start acct 2>/dev/null
+echo DONE""",
+        },
+        'sysstat': {
+            'check': """command -v sar >/dev/null 2>&1 && echo OK || echo FAIL""",
+            'apply': """apt-get install -y sysstat >/dev/null 2>&1
+sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat 2>/dev/null
+systemctl enable sysstat 2>/dev/null; systemctl restart sysstat 2>/dev/null
+echo DONE""",
+        },
+        'usb_storage': {
+            'check': """[ -f /etc/modprobe.d/cis-usb-storage.conf ] && echo OK || echo FAIL""",
+            'apply': """echo 'install usb-storage /bin/true' > /etc/modprobe.d/cis-usb-storage.conf
+echo 'install firewire-core /bin/true' > /etc/modprobe.d/cis-firewire.conf
+rmmod usb-storage 2>/dev/null; rmmod firewire-core 2>/dev/null
+echo DONE""",
+        },
+        'restrict_compilers': {
+            'check': """if command -v gcc >/dev/null 2>&1; then
+stat -c '%a' $(which gcc) 2>/dev/null | grep -q '700' && echo OK || echo FAIL
+else echo OK; fi""",
+            'apply': """for comp in gcc g++ cc make; do
+  p=$(which $comp 2>/dev/null)
+  [ -n "$p" ] && chmod 700 "$p"
+done
+echo DONE""",
+        },
+        'apt_show_versions': {
+            'check': """command -v apt-show-versions >/dev/null 2>&1 && echo OK || echo FAIL""",
+            'apply': """apt-get install -y apt-show-versions >/dev/null 2>&1
+echo DONE""",
+        },
+        'pam_tmpdir': {
+            'check': """dpkg -l libpam-tmpdir 2>/dev/null | grep -q '^ii' && echo OK || echo FAIL""",
+            'apply': """apt-get install -y libpam-tmpdir >/dev/null 2>&1
+echo DONE""",
+        },
+        # ---- STIG (DoD) controls - NS Mar 2026 ----
+        'session_limit': {
+            'check': """grep -q 'pam_limits.so' /etc/pam.d/common-session 2>/dev/null && \
+grep -q 'maxlogins' /etc/security/limits.d/*stig* 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """echo '* hard maxlogins 10' > /etc/security/limits.d/stig-maxlogins.conf
+# root unlimited for cluster ops
+echo 'root hard maxlogins 0' >> /etc/security/limits.d/stig-maxlogins.conf
+if ! grep -q pam_limits /etc/pam.d/common-session; then
+  echo 'session required pam_limits.so' >> /etc/pam.d/common-session
+fi
+echo DONE""",
+        },
+        'inactive_accounts': {
+            'check': """command -v useradd >/dev/null 2>&1 && \
+useradd -D 2>/dev/null | grep -q 'INACTIVE=35' && echo OK || echo FAIL""",
+            'apply': """useradd -D -f 35
+# don't touch root, system accounts, or known service accounts
+for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+  chage -I 35 "$user" 2>/dev/null
+done
+echo DONE""",
+        },
+        'remove_legacy_svcs': {
+            'check': """dpkg -l telnet rsh-server rsh-client talk ntalk nis 2>/dev/null | grep -q '^ii' && echo FAIL || echo OK""",
+            'apply': """apt-get purge -y telnet rsh-server rsh-client talk ntalk nis 2>/dev/null
+echo DONE""",
+        },
+        'audit_boot': {
+            'check': """grep -q 'audit=1' /proc/cmdline && echo OK || echo FAIL""",
+            'apply': """apt-get install -y auditd >/dev/null 2>&1
+# add to GRUB defaults if not present
+if ! grep -q 'audit=1' /etc/default/grub; then
+  sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\\(.*\\)"/GRUB_CMDLINE_LINUX_DEFAULT="\\1 audit=1"/' /etc/default/grub
+  sed -i 's/^GRUB_CMDLINE_LINUX="\\(.*\\)"/GRUB_CMDLINE_LINUX="\\1 audit=1"/' /etc/default/grub
+  update-grub 2>/dev/null
+fi
+systemctl enable auditd 2>/dev/null; systemctl start auditd 2>/dev/null
+echo DONE""",
+        },
+        'audit_rules': {
+            # check for our stig rules file
+            'check': """[ -f /etc/audit/rules.d/stig-pegaprox.rules ] && echo OK || echo FAIL""",
+            'apply': """apt-get install -y auditd >/dev/null 2>&1
+cat > /etc/audit/rules.d/stig-pegaprox.rules << 'AUEOF'
+## STIG Extended Audit Rules - deployed by PegaProx
+# privileged commands
+-a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295 -k priv_cmd
+-a always,exit -F path=/usr/bin/su -F perm=x -F auid>=1000 -F auid!=4294967295 -k priv_cmd
+-a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k priv_cmd
+-a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=1000 -F auid!=4294967295 -k priv_cmd
+-a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=1000 -F auid!=4294967295 -k priv_cmd
+# permission changes
+-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=4294967295 -k perm_chg
+-a always,exit -F arch=b64 -S chown,fchown,lchown,fchownat -F auid>=1000 -F auid!=4294967295 -k perm_chg
+# account modifications
+-w /etc/passwd -p wa -k acct_mod
+-w /etc/shadow -p wa -k acct_mod
+-w /etc/group -p wa -k acct_mod
+-w /etc/gshadow -p wa -k acct_mod
+# cron changes
+-w /etc/crontab -p wa -k cron_mod
+-w /etc/cron.d -p wa -k cron_mod
+# kernel module loading
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k mod_load
+# network config
+-a always,exit -F arch=b64 -S sethostname,setdomainname -k net_cfg
+-w /etc/hosts -p wa -k net_cfg
+-w /etc/network -p wa -k net_cfg
+# proxmox config monitoring
+-w /etc/pve/ -p wa -k pve_cfg
+AUEOF
+augenrules --load 2>/dev/null
+echo DONE""",
+        },
+        'aide_audit_protect': {
+            'check': """[ -f /etc/aide/aide.conf.d/99_stig_audit ] && echo OK || echo FAIL""",
+            'apply': """mkdir -p /etc/aide/aide.conf.d
+cat > /etc/aide/aide.conf.d/99_stig_audit << 'AEOF'
+# STIG - protect audit binaries
+/usr/sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512
+/usr/sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512
+/usr/sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512
+/usr/sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512
+/usr/sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512
+/usr/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
+AEOF
+echo DONE""",
+        },
+        'mem_protection': {
+            'check': """grep -q 'init_on_alloc=1' /proc/cmdline && grep -q 'init_on_free=1' /proc/cmdline && echo OK || echo FAIL""",
+            'apply': """PARAMS='init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 slab_nomerge'
+for p in $PARAMS; do
+  if ! grep -q "$p" /etc/default/grub; then
+    sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=\"\\(.*\\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\\1 $p\"/" /etc/default/grub
+  fi
+done
+update-grub 2>/dev/null
+echo DONE""",
+        },
+        'audit_immutable': {
+            'check': """grep -q '^\-e 2' /etc/audit/rules.d/*immutable* 2>/dev/null && echo OK || echo FAIL""",
+            'apply': """echo '# STIG V-270832 - lock audit rules (reboot to change)' > /etc/audit/rules.d/99-stig-immutable.rules
+echo '-e 2' >> /etc/audit/rules.d/99-stig-immutable.rules
+augenrules --load 2>/dev/null
+echo DONE""",
+        },
+    }
+
+    def check_node_hardening(self, node_name):
+        """Check CIS hardening status for a node via SSH"""
+        # build one big command to minimize SSH round-trips
+        parts = []
+        for cid, ctrl in self.CIS_CHECKS.items():
+            parts.append(f"echo '---{cid}---' && {{ {ctrl['check']}; }}")
+        combined = ' ; '.join(parts) + " ; echo '---END---'"
+
+        raw = self._ssh_node_output(node_name, combined, timeout=60)
+        if raw is None:
+            return None
+
+        results = {}
+        current_id = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith('---') and line.endswith('---'):
+                tag = line.strip('-')
+                if tag == 'END':
+                    break
+                if tag in self.CIS_CHECKS:
+                    current_id = tag
+            elif current_id:
+                results[current_id] = line.strip() == 'OK'
+                current_id = None
+
+        return results
+
+    def apply_node_hardening(self, node_name, controls):
+        """Apply selected CIS controls to a node. Returns per-control results."""
+        out = {}
+        for ctrl_id in controls:
+            if ctrl_id not in self.CIS_CHECKS:
+                out[ctrl_id] = {'success': False, 'error': 'unknown control'}
+                continue
+            cmd = self.CIS_CHECKS[ctrl_id]['apply']
+            result = self._ssh_node_output(node_name, cmd, timeout=60)
+            if result is not None and 'DONE' in result:
+                out[ctrl_id] = {'success': True}
+            else:
+                out[ctrl_id] = {'success': False, 'error': result or 'SSH command failed'}
+        return out
+
     def start(self):
         """Start the PegaProx daemon"""
         if self.running:

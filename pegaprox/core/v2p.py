@@ -346,9 +346,16 @@ def _run_v2p_migration(task):
         detected_nic = hw.get('nic_type_pve', 'e1000')
         net_driver = task.net_driver if task.net_driver in ('e1000', 'e1000e', 'virtio', 'vmxnet3') else detected_nic
         
+        # PVE requires DNS-valid names - ESXi allows spaces/special chars (#129)
+        raw_name = vm_data.get('name', f'v2p-{task.proxmox_vmid}')
+        pve_name = re.sub(r'[^a-zA-Z0-9\-]', '-', raw_name)
+        pve_name = re.sub(r'-{2,}', '-', pve_name).strip('-')[:63]
+        if not pve_name or not pve_name[0].isalpha():
+            pve_name = f'vm-{pve_name}'[:63]
+
         pve_config = {
             'vmid': task.proxmox_vmid,
-            'name': vm_data.get('name', f'v2p-{task.proxmox_vmid}'),
+            'name': pve_name,
             'memory': vm_data.get('memory_mb', 2048),
             'cores': vm_data.get('cpu_count', 1),
             'sockets': 1,
@@ -361,6 +368,8 @@ def _run_v2p_migration(task):
         if bios == 'ovmf':
             pve_config['efidisk0'] = f'{task.target_storage}:1,efitype=4m,pre-enrolled-keys=0'
         
+        if pve_name != raw_name:
+            task.log(f"VM name sanitized: '{raw_name}' -> '{pve_name}' (PVE requires DNS-valid names)")
         # Log detected VMware hardware
         task.log(f"VMware hardware: firmware={firmware}, scsi={hw.get('scsi_controller', '?')}, "
                  f"nic={hw.get('nic_type', '?')}, bus={detected_bus}")

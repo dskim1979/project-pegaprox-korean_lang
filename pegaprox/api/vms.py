@@ -4579,6 +4579,165 @@ def run_replication_now_api(cluster_id, job_id):
 
 
 # ==================== CROSS-CLUSTER REPLICATION ====================
+# NS: Mar 2026 - same-cluster snapshot replication for non-ZFS storage (#103)
+# Proxmox native replication needs ZFS, this works with any storage backend
+# Flow: snapshot -> clone to target storage -> migrate clone to target node -> cleanup
+def _execute_local_replication(job):
+    """Run snapshot-based replication within the same cluster (no ZFS needed)."""
+    db = get_db()
+    job_id = job['id']
+    vmid = int(job['vmid'])
+    vm_type = job.get('vm_type', 'qemu') or 'qemu'
+    cluster_id = job['source_cluster']
+    target_node = job.get('target_node', '')
+    target_storage = job.get('target_storage', '') or 'local-lvm'
+
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        _update_repl_status(db, job_id, 'error', 'Cluster not found')
+        return
+
+    if not mgr.is_connected:
+        _update_repl_status(db, job_id, 'error', 'Cluster not connected')
+        return
+
+    snap_name = f"repl-{job_id}-{int(time.time())}"
+    clone_vmid = None
+    source_node = None
+
+    try:
+        # 1. find source node
+        res = mgr._api_get(
+            f"https://{mgr.host}:8006/api2/json/cluster/resources",
+            params={'type': 'vm'}
+        )
+        if res.status_code == 200:
+            for r in res.json().get('data', []):
+                if int(r.get('vmid', 0)) == vmid:
+                    source_node = r.get('node')
+                    break
+
+        if not source_node:
+            _update_repl_status(db, job_id, 'error', f'VM {vmid} not found')
+            return
+
+        if not target_node:
+            _update_repl_status(db, job_id, 'error', 'No target node configured')
+            return
+
+        logging.info(f"[REPL] Job {job_id}: replicating {vm_type}/{vmid} from {source_node} to {target_node}")
+
+        # 2. create snapshot
+        snap_url = f"https://{mgr.host}:8006/api2/json/nodes/{source_node}/{vm_type}/{vmid}/snapshot"
+        snap_resp = mgr._api_post(snap_url, data={
+            'snapname': snap_name,
+            'description': f'Snapshot replication {job_id}'
+        })
+        if snap_resp.status_code != 200:
+            _update_repl_status(db, job_id, 'error', f'Snapshot failed: {snap_resp.text}')
+            return
+
+        snap_task = snap_resp.json().get('data')
+        if not _wait_for_task(mgr, snap_task):
+            _update_repl_status(db, job_id, 'error', 'Snapshot task did not complete')
+            return
+
+        # 3. get next free VMID
+        nextid_resp = mgr._api_get(f"https://{mgr.host}:8006/api2/json/cluster/nextid")
+        if nextid_resp.status_code != 200:
+            _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
+            _update_repl_status(db, job_id, 'error', 'Could not get next VMID')
+            return
+
+        clone_vmid = int(nextid_resp.json().get('data'))
+
+        # 4. clone from snapshot (full clone to target storage)
+        clone_url = f"https://{mgr.host}:8006/api2/json/nodes/{source_node}/{vm_type}/{vmid}/clone"
+        clone_data = {
+            'newid': clone_vmid,
+            'snapname': snap_name,
+            'full': 1,
+            'name': f'repl-{vmid}-{target_node}',
+        }
+        if target_storage:
+            clone_data['target'] = target_storage
+
+        clone_resp = mgr._api_post(clone_url, data=clone_data)
+        if clone_resp.status_code != 200:
+            _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
+            _update_repl_status(db, job_id, 'error', f'Clone failed: {clone_resp.text}')
+            return
+
+        clone_task = clone_resp.json().get('data')
+        if not _wait_for_task(mgr, clone_task, timeout=1800):
+            _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
+            _update_repl_status(db, job_id, 'error', 'Clone task timed out')
+            return
+
+        logging.info(f"[REPL] Job {job_id}: clone {clone_vmid} created")
+
+        # 5. migrate clone to target node (if on different node)
+        if source_node != target_node:
+            mig_result = mgr.migrate_vm_manual(
+                node=source_node, vmid=clone_vmid, vm_type=vm_type,
+                target_node=target_node, online=False,
+                options={'targetstorage': target_storage} if target_storage else {}
+            )
+            if not mig_result.get('success'):
+                # cleanup clone + snap
+                _cleanup_clone_and_snap(mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                _update_repl_status(db, job_id, 'error', f'Migration failed: {mig_result.get("error")}')
+                return
+
+            mig_task = mig_result.get('task')
+            if mig_task and not _wait_for_task(mgr, mig_task, timeout=3600):
+                _cleanup_clone_and_snap(mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                _update_repl_status(db, job_id, 'error', 'Migration timed out')
+                return
+
+        logging.info(f"[REPL] Job {job_id}: clone migrated to {target_node}")
+
+        # 6. delete old replica if exists, rename new one
+        # check for previous replica VMs with name pattern repl-{vmid}-{target_node}
+        try:
+            all_vms = mgr._api_get(
+                f"https://{mgr.host}:8006/api2/json/cluster/resources",
+                params={'type': 'vm'}
+            )
+            if all_vms.status_code == 200:
+                for v in all_vms.json().get('data', []):
+                    vname = v.get('name', '')
+                    vid = int(v.get('vmid', 0))
+                    # delete previous replicas but not the one we just created
+                    if vname == f'repl-{vmid}-{target_node}' and vid != clone_vmid:
+                        old_node = v.get('node', target_node)
+                        try:
+                            # stop if running
+                            if v.get('status') == 'running':
+                                mgr._api_post(f"https://{mgr.host}:8006/api2/json/nodes/{old_node}/{vm_type}/{vid}/status/stop", data={})
+                                time.sleep(5)
+                            mgr._api_delete(f"https://{mgr.host}:8006/api2/json/nodes/{old_node}/{vm_type}/{vid}")
+                            logging.info(f"[REPL] Deleted old replica VM {vid}")
+                        except Exception as del_e:
+                            logging.warning(f"[REPL] Could not delete old replica {vid}: {del_e}")
+        except Exception:
+            pass
+
+        # 7. cleanup snapshot on source
+        _cleanup_snapshot(mgr, source_node, vmid, vm_type, snap_name)
+        _update_repl_status(db, job_id, 'ok', '')
+        logging.info(f"[REPL] Job {job_id}: replication complete")
+
+    except Exception as e:
+        logging.error(f"[REPL] Job {job_id}: error: {e}")
+        _update_repl_status(db, job_id, 'error', str(e))
+        if clone_vmid:
+            try:
+                _cleanup_clone_and_snap(mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+            except Exception:
+                pass
+
+
 # MK: Feb 2026 - snapshot-based replication between clusters
 # Proxmox native replication only works intra-cluster, so for DR across
 # separate clusters we use snapshot + clone + remote-migrate approach.
@@ -4905,8 +5064,12 @@ def create_cross_cluster_replication():
         return jsonify({'error': 'Source cluster not found'}), 404
     if target_cluster not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
-    if source_cluster == target_cluster:
-        return jsonify({'error': 'Source and target cluster must be different'}), 400
+
+    # NS: Mar 2026 - same-cluster snapshot replication for non-ZFS (Issue #103)
+    # target_node required when source == target cluster
+    target_node = data.get('target_node', '')
+    if source_cluster == target_cluster and not target_node:
+        return jsonify({'error': 'target_node is required for same-cluster replication'}), 400
 
     job_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
@@ -4915,8 +5078,8 @@ def create_cross_cluster_replication():
     db.execute('''
         INSERT INTO cross_cluster_replications
         (id, source_cluster, target_cluster, vmid, vm_type, schedule, retention,
-         target_storage, target_bridge, enabled, created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         target_storage, target_bridge, target_node, enabled, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     ''', (
         job_id,
         source_cluster,
@@ -4927,6 +5090,7 @@ def create_cross_cluster_replication():
         int(data.get('retention', 3)),
         data.get('target_storage', ''),
         data.get('target_bridge', 'vmbr0'),
+        target_node,
         getattr(request, 'session', {}).get('user', 'system'),
         now, now,
     ))
@@ -4965,12 +5129,33 @@ def run_cross_cluster_replication(job_id):
         return jsonify({'error': 'Replication job not found'}), 404
 
     # kick off in background so the API responds right away
-    threading.Thread(target=_execute_replication, args=(dict(job),), daemon=True).start()
+    # NS: detect same-cluster -> use local replication
+    job_dict = dict(job)
+    is_local = job_dict.get('source_cluster') == job_dict.get('target_cluster')
+    handler = _execute_local_replication if is_local else _execute_replication
+    threading.Thread(target=handler, args=(job_dict,), daemon=True).start()
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'replication.triggered', f"Cross-cluster replication {job_id} manually triggered")
+    log_audit(usr, 'replication.triggered', f"{'Local' if is_local else 'Cross-cluster'} replication {job_id} manually triggered")
 
     return jsonify({'success': True, 'message': 'Replication started'})
+
+
+# NS: Mar 2026 - get snapshot replication jobs filtered by cluster (#103)
+@bp.route('/api/clusters/<cluster_id>/snapshot-replications', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_snapshot_replications_for_cluster(cluster_id):
+    """Get snapshot-based replication jobs where this cluster is source or target."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+
+    db = get_db()
+    rows = db.query(
+        'SELECT * FROM cross_cluster_replications WHERE source_cluster = ? OR target_cluster = ?',
+        (cluster_id, cluster_id)
+    )
+    return jsonify([dict(r) for r in rows])
 
 
 @bp.route('/api/hardware-options', methods=['GET'])
