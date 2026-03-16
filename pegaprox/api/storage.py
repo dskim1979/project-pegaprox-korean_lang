@@ -305,7 +305,7 @@ def get_esxi_vms(cluster_id, host_id):
     
     try:
         # get a node to query from (any node works for shared storage queries)
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
         nodes_resp = mgr._api_get(f"https://{host}:8006/api2/json/nodes")
         nodes = []
         if nodes_resp.status_code == 200:
@@ -646,7 +646,7 @@ def get_storage_cluster_status(cluster_id, sc_id):
         return jsonify({'error': 'Storage cluster not found'}), 404
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Try to get storage stats from cache first
         cache_key = f"storage_stats:{sc_id}"
@@ -877,7 +877,7 @@ def execute_storage_migration(cluster_id):
         return jsonify({'error': 'Missing required parameters: vmid, disk, target'}), 400
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Find the VM
         resources_url = f"https://{host}:8006/api2/json/cluster/resources?type=vm"
@@ -1060,7 +1060,7 @@ def run_auto_storage_balance():
                                 upid = m.get('upid')
                                 if upid and manager.is_connected:
                                     try:
-                                        host = manager.current_host or manager.config.host
+                                        host = manager.host
                                         # UPID format: UPID:node:..., extract node
                                         parts = upid.split(':')
                                         task_node = parts[1] if len(parts) > 1 else None
@@ -1084,7 +1084,7 @@ def run_auto_storage_balance():
                             logging.debug(f"Auto-balance skipped for {sc['name']} - rate limited")
                             continue
                         
-                        host = manager.current_host or manager.config.host
+                        host = manager.host
                         
                         # Try to get storage stats from cache first
                         cache_key = f"auto_balance_storage:{sc['id']}"
@@ -1351,7 +1351,7 @@ def create_storage(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/storage"
         data = request.json or {}
         
@@ -1450,7 +1450,7 @@ def get_storage_config(cluster_id, storage_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/storage/{storage_id}"
         
         response = manager._create_session().get(url, timeout=10)
@@ -1477,7 +1477,7 @@ def update_storage(cluster_id, storage_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/storage/{storage_id}"
         data = request.json or {}
         
@@ -1536,7 +1536,7 @@ def delete_storage(cluster_id, storage_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/storage/{storage_id}"
         
         response = manager._create_session().delete(url, timeout=10)
@@ -1573,7 +1573,7 @@ def get_storage_status(cluster_id, storage_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Get storage config first
         config_url = f"https://{host}:8006/api2/json/storage/{storage_id}"
@@ -1634,7 +1634,7 @@ def rescan_storage(cluster_id, storage_id):
     username = request.session.get('user', 'unknown')
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         data = request.json or {}
         target_nodes = data.get('nodes', [])  # Optional: specific nodes to rescan
@@ -1936,7 +1936,7 @@ def scan_storage(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         storage_type = data.get('type', 'iscsi')
         
@@ -2037,7 +2037,7 @@ def get_available_templates(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         template_type = request.args.get('type', 'lxc')
         
         # Get a node to query
@@ -2102,7 +2102,7 @@ def download_template(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         storage = data.get('storage')
@@ -2176,7 +2176,7 @@ def get_node_storage_content(cluster_id, node, storage):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         content_type = request.args.get('content', '')
         
         url = f"https://{host}:8006/api2/json/nodes/{node}/storage/{storage}/content"
@@ -2214,7 +2214,7 @@ def download_from_url(cluster_id, node, storage):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = data.get('url')
@@ -2278,7 +2278,7 @@ def get_backup_jobs(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/backup"
         r = manager._create_session().get(url, timeout=5)
         
@@ -2300,7 +2300,7 @@ def create_backup_job(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/backup"
         data = request.json or {}
         
@@ -2326,7 +2326,7 @@ def update_backup_job(cluster_id, job_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/backup/{job_id}"
         data = request.json or {}
         
@@ -2352,7 +2352,7 @@ def delete_backup_job(cluster_id, job_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/backup/{job_id}"
         
         response = manager._create_session().delete(url, timeout=10)

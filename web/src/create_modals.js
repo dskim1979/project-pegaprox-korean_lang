@@ -7,9 +7,10 @@
         // The wizard steps are a bit complex but users seem to like it
         // ChatGPT helped with the step indicator UI - looks pretty clean
         // TODO: add template support for quick vm creation
-        function CreateVmModal({ vmType, clusterId, nodes: initialNodes, onCreate, onClose }) {
+        function CreateVmModal({ vmType, clusterId, clusterType, nodes: initialNodes, onCreate, onClose }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
+            const { isCorporate } = useLayout();
             const [activeStep, setActiveStep] = useState(0);
             const [loading, setLoading] = useState(false);
             const [storageList, setStorageList] = useState([]);
@@ -18,9 +19,10 @@
             const [templateList, setTemplateList] = useState([]);
             const [nextVmid, setNextVmid] = useState('');
             const [nodes, setNodes] = useState(initialNodes || []);
-            // const [advancedMode, setAdvancedMode] = useState(false);  // someday
-            
+            const [xcpOsTypes, setXcpOsTypes] = useState([]);
+
             const isQemu = vmType === 'qemu';
+            const isXcpng = clusterType === 'xcpng';
             
             // Local authFetch helper
             const authFetch = async (url, options = {}) => {
@@ -152,6 +154,12 @@
                 // Options
                 onboot: false,
                 start: false,
+
+                // XCP-ng specific
+                install_method: 'template',   // template, iso, pxe
+                os_type: 'linux',             // OS type key for built-in template
+                iso_uuid: '',                 // VDI UUID of ISO
+                boot_order: 'dc',             // cdrom+disk for ISO, 'n' for PXE
             });
 
             useEffect(() => {
@@ -165,9 +173,15 @@
                 if(config.node) {
                     fetchStorageList();
                     fetchBridgeList();
-                    if(isQemu) fetchIsoList();
-                    else fetchTemplateList();
+                    if(isQemu) {
+                        fetchIsoList();
+                        if(isXcpng) fetchTemplateList();  // XCP-ng needs templates for 'from template' method
+                    } else {
+                        fetchTemplateList();
+                    }
                     fetchNextVmid();
+                    // NS: fetch XCP-ng OS types for from-scratch creation
+                    if(isXcpng && isQemu) fetchXcpOsTypes();
                 }
             }, [config.node]);
 
@@ -233,15 +247,28 @@
                 } catch (e) { console.error(e); }
             };
 
+            const fetchXcpOsTypes = async () => {
+                try {
+                    const resp = await authFetch(`${API_URL}/clusters/${clusterId}/xcp/os-types`);
+                    if(resp && resp.ok) {
+                        const data = await resp.json();
+                        setXcpOsTypes(data);
+                    }
+                } catch(e) { /* ignore */ }
+            };
+
             const handleCreate = async () => {
                 setLoading(true);
                 await onCreate(vmType, config.node, config);
                 setLoading(false);
             };
 
-            const steps = isQemu 
-                ? [t('general'), t('os'), t('hardware'), t('disk'), t('network'), t('advanced')]
-                : [t('general'), t('template'), t('resources'), t('disk'), t('network'), t('options')];
+            // LW: XCP-ng VMs skip the advanced step (no BIOS/Machine/SCSI/EFI/TPM)
+            const steps = isXcpng && isQemu
+                ? [t('general'), t('installMethod') || 'Install', t('hardware'), t('disk'), t('network'), t('options') || 'Options']
+                : isQemu
+                    ? [t('general'), t('os'), t('hardware'), t('disk'), t('network'), t('advanced')]
+                    : [t('general'), t('template'), t('resources'), t('disk'), t('network'), t('options')];
 
             const osTypes = [
                 { value: 'l26', label: 'Linux 2.6+ Kernel' },
@@ -328,7 +355,78 @@
                                     </div>
                                 </div>
                             );
-                        case 1: // OS
+                        case 1: // OS / Install Method
+                            if(isXcpng) {
+                                // XCP-ng: install method selection + OS type + ISO
+                                return (
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('installMethod') || 'Install Method'}</label>
+                                            <div className="flex gap-3">
+                                                {['template', 'iso', 'pxe'].map(m => (
+                                                    <label key={m} className={`flex-1 flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-colors ${config.install_method === m ? 'border-orange-500 bg-orange-500/10 text-white' : 'border-proxmox-border bg-proxmox-dark text-gray-400 hover:border-gray-500'}`}>
+                                                        <input type="radio" name="install_method" value={m} checked={config.install_method === m}
+                                                            onChange={e => setConfig({...config, install_method: e.target.value})}
+                                                            className="hidden" />
+                                                        <span className="text-sm font-medium">
+                                                            {m === 'template' ? (t('fromTemplate') || 'From Template') :
+                                                             m === 'iso' ? (t('fromIso') || 'From ISO') :
+                                                             'PXE Boot'}
+                                                        </span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {config.install_method === 'template' && (
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('template')}</label>
+                                                <select value={config.template} onChange={e => setConfig({...config, template: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
+                                                    <option value="">{t('selectTemplate') || 'Select template...'}</option>
+                                                    {templateList.map(tpl => <option key={tpl.uuid} value={tpl.uuid}>{tpl.name}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+
+                                        {(config.install_method === 'iso' || config.install_method === 'pxe') && (
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('osType') || 'OS Type'}</label>
+                                                <select value={config.os_type} onChange={e => setConfig({...config, os_type: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
+                                                    {xcpOsTypes.map(os => <option key={os.key} value={os.key}>{os.label}</option>)}
+                                                    {xcpOsTypes.length === 0 && (
+                                                        <>
+                                                            <option value="linux">Linux (Generic)</option>
+                                                            <option value="windows">Windows</option>
+                                                            <option value="other">Other</option>
+                                                        </>
+                                                    )}
+                                                </select>
+                                                <p className="text-xs text-gray-500 mt-1">{t('osTypeHint') || 'Selects the correct built-in template for platform flags'}</p>
+                                            </div>
+                                        )}
+
+                                        {config.install_method === 'iso' && (
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('isoImage')}</label>
+                                                <select value={config.iso_uuid} onChange={e => setConfig({...config, iso_uuid: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white">
+                                                    <option value="">{t('selectIso') || 'Select ISO...'}</option>
+                                                    {isoList.map(iso => <option key={iso.uuid || iso.volid} value={iso.uuid || iso.volid}>{iso.name || iso.volid}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+
+                                        {config.install_method === 'pxe' && (
+                                            <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                                                <p className="text-sm text-blue-400">{t('pxeHint') || 'VM will boot from network (PXE). Make sure a PXE/DHCP server is available on the selected network.'}</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            }
+                            // Proxmox: standard OS selection
                             return (
                                 <div className="space-y-4">
                                     <div>
@@ -372,14 +470,16 @@
                             return (
                                 <div className="space-y-4">
                                     <div className="grid grid-cols-2 gap-4">
+                                        {!isXcpng && (
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">{t('sockets')}</label>
+                                                <input type="number" min="1" max="4" value={config.sockets} onChange={e => setConfig({...config, sockets: parseInt(e.target.value)})}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
+                                            </div>
+                                        )}
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('sockets')}</label>
-                                            <input type="number" min="1" max="4" value={config.sockets} onChange={e => setConfig({...config, sockets: parseInt(e.target.value)})}
-                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm text-gray-400 mb-1">{t('cores')}</label>
-                                            <input type="number" min="1" max="128" value={config.cores} onChange={e => setConfig({...config, cores: parseInt(e.target.value)})}
+                                            <label className="block text-sm text-gray-400 mb-1">{isXcpng ? 'vCPUs' : t('cores')}</label>
+                                            <input type="number" min="1" max={isXcpng ? 256 : 128} value={config.cores} onChange={e => setConfig({...config, cores: parseInt(e.target.value)})}
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white" />
                                         </div>
                                     </div>
@@ -499,7 +599,31 @@
                                 <div className="space-y-4">
                                     {/* MK: Primary Disk with ALL options */}
                                     <div className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
-                                        <h4 className="text-sm font-medium text-white mb-3">{t('primaryDisk') || 'Disk'} 0 ({config.disk_type}0)</h4>
+                                        <h4 className="text-sm font-medium text-white mb-3">{isXcpng ? (t('virtualDisk') || 'Virtual Disk') : `${t('primaryDisk') || 'Disk'} 0 (${config.disk_type}0)`}</h4>
+                                        {isXcpng ? (
+                                            /* XCP-ng: simplified disk config - just SR + size */
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('storageRepository') || 'Storage Repository'}</label>
+                                                    <select value={config.storage} onChange={e => setConfig({...config, storage: e.target.value})}
+                                                        className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                                        {diskStorages.map(s => (
+                                                            <option key={s.storage} value={s.storage}>
+                                                                {s.storage} ({s.type})
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                    {renderStorageBar(config.storage)}
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('size')} (GB)</label>
+                                                    <input type="number" min="1" value={config.disk_size} onChange={e => setConfig({...config, disk_size: e.target.value})}
+                                                        className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm" />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            /* Proxmox: full disk options */
+                                            <>
                                         <div className="grid grid-cols-4 gap-3 mb-3">
                                             <div>
                                                 <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
@@ -577,6 +701,8 @@
                                                 {t('ssdEmulation')}
                                             </label>
                                         </div>
+                                            </>
+                                        )}
                                     </div>
                                     
                                     {/* MK: Additional Disks - each with ALL options */}
@@ -797,7 +923,30 @@
                                     </label>
                                 </div>
                             );
-                        case 5: // Advanced
+                        case 5: // Advanced / Options
+                            if(isXcpng) {
+                                // XCP-ng: simplified options (no BIOS/Machine/SCSI/EFI/TPM)
+                                return (
+                                    <div className="space-y-4">
+                                        <div className="space-y-2">
+                                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                <input type="checkbox" checked={config.onboot} onChange={e => setConfig({...config, onboot: e.target.checked})} className="rounded" />
+                                                {t('startOnBoot')}
+                                            </label>
+                                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                <input type="checkbox" checked={config.start} onChange={e => setConfig({...config, start: e.target.checked})} className="rounded" />
+                                                {t('startAfterCreate')}
+                                            </label>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('description') || 'Description'}</label>
+                                            <textarea value={config.description || ''} onChange={e => setConfig({...config, description: e.target.value})}
+                                                rows="3" placeholder={t('optionalDescription') || 'Optional description...'}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white resize-none" />
+                                        </div>
+                                    </div>
+                                );
+                            }
                             return (
                                 <div className="space-y-4">
                                     <div className="grid grid-cols-2 gap-4">
@@ -1390,9 +1539,18 @@
 
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
-                    <div className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl animate-scale-in overflow-hidden">
+                    <div className={`w-full max-w-2xl bg-proxmox-card border border-proxmox-border shadow-2xl overflow-hidden ${isCorporate ? 'rounded' : 'rounded-xl animate-scale-in'}`}>
                         {/* Header */}
-                        <div className="flex items-center justify-between px-6 py-4 border-b border-proxmox-border bg-proxmox-dark">
+                        {isCorporate ? (
+                        <div className="corp-modal-header">
+                            <span className="corp-modal-title" style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                                {isQemu ? <Icons.VM className="w-4 h-4" style={{color:'var(--corp-accent)'}} /> : <Icons.Container className="w-4 h-4" style={{color:'#9b59b6'}} />}
+                                {isQemu ? t('createVm') : t('createContainer')}
+                            </span>
+                            <button className="corp-modal-close" onClick={onClose}><Icons.X className="w-4 h-4" /></button>
+                        </div>
+                        ) : (
+                        <div className="flex items-center justify-between border-b border-proxmox-border bg-proxmox-dark px-6 py-4">
                             <div className="flex items-center gap-3">
                                 <div className={`p-2 rounded-lg ${isQemu ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}>
                                     {isQemu ? <Icons.VM /> : <Icons.Container />}
@@ -1405,6 +1563,7 @@
                                 <Icons.X />
                             </button>
                         </div>
+                        )}
 
                         {/* No nodes warning */}
                         {nodes.length === 0 && (
@@ -1488,6 +1647,7 @@
         // Defaults are pretty sensible, most users just need host + credentials
         function AddClusterModal({ isOpen, onClose, onSubmit, onAddPBS, onAddVMware, loading, error, initialType = 'proxmox' }) {
             const { t } = useTranslation();
+            const { isCorporate } = useLayout();
             const [connectionType, setConnectionType] = useState(initialType);
             
             // Sync with initialType when modal opens with different type
@@ -1829,6 +1989,7 @@
         function UserProfileModal({ isOpen, onClose, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user, updatePreferences } = useAuth();
+            const { isCorporate } = useLayout();
             const [activeTab, setActiveTab] = useState('appearance');
             const [loading, setLoading] = useState(false);
             const [selectedTheme, setSelectedTheme] = useState(user?.theme || 'proxmoxDark');

@@ -528,26 +528,41 @@
         // NS: Full node management - shell, network, disks, etc.
         // Shell tab uses xterm.js (web terminal), pretty cool
         // LW: I did the UI, Marcus handled the backend websocket stuff
-        function NodeModal({ node, clusterId, onClose, addToast }) {
+        function NodeModal({ node, clusterId, clusterType, onClose, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();  // NS: Fix - need auth!
+            const { isCorporate } = useLayout();
             const [activeTab, setActiveTab] = useState('summary');
             const [loading, setLoading] = useState(true);
             const [data, setData] = useState({});
-            
+            const isXcpng = clusterType === 'xcpng';
+
             // NS: Disk creation modal state - Dec 2025
             const [diskModal, setDiskModal] = useState({ open: false, type: null });
             const [diskForm, setDiskForm] = useState({
                 device: '', name: '', vgname: '', thinpool: '',
                 devices: [], raidlevel: 'single', compression: 'on', ashift: 12,
-                filesystem: 'ext4', add_storage: true
+                filesystem: 'ext4', add_storage: true,
+                // XCP-ng SR fields
+                sr_type: 'nfs', server: '', path: '', nfsversion: '3',
+                target: '', iqn: '', scsi_id: '', port: '3260',
+                chap_user: '', chap_pass: '',
             });
             const [diskCreating, setDiskCreating] = useState(false);
             const [perfTimeframe, setPerfTimeframe] = useState('hour'); // NS: For performance metrics
-            
+
             const authHeaders = getAuthHeaders();  // NS: Get auth headers
 
-            const tabs = [
+            // LW: XCP-ng doesn't have Ceph, repos differ, subscription not applicable
+            const tabs = isXcpng ? [
+                { id: 'summary', label: 'Summary', icon: Icons.Activity },
+                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
+                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
+                { id: 'network', label: 'Network', icon: Icons.Network },
+                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'disks', label: t('storageRepos') || 'Storage', icon: Icons.HardDrive },
+                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+            ] : [
                 { id: 'summary', label: 'Summary', icon: Icons.Activity },
                 { id: 'performance', label: 'Performance', icon: Icons.BarChart },
                 { id: 'shell', label: 'Shell', icon: Icons.Terminal },
@@ -655,7 +670,10 @@
                 setDiskForm({
                     device: '', name: '', vgname: '', thinpool: '',
                     devices: [], raidlevel: 'single', compression: 'on', ashift: 12,
-                    filesystem: 'ext4', add_storage: true
+                    filesystem: 'ext4', add_storage: true,
+                    sr_type: 'nfs', server: '', path: '', nfsversion: '3',
+                    target: '', iqn: '', scsi_id: '', port: '3260',
+                    chap_user: '', chap_pass: '',
                 });
                 // NS: Make sure disk data is loaded before opening modal
                 if (!data.disks || data.disks.length === 0) {
@@ -704,8 +722,32 @@
                     }
                     endpoint = 'disks/directory';
                     body = { device: diskForm.device, name: diskForm.name, filesystem: diskForm.filesystem, add_storage: diskForm.add_storage };
+                } else if (type === 'sr') {
+                    // XCP-ng SR creation
+                    if (!diskForm.name) {
+                        addToast('Name required', 'error');
+                        return;
+                    }
+                    endpoint = 'sr/create';
+                    body = { type: diskForm.sr_type, name: diskForm.name };
+                    if (diskForm.sr_type === 'nfs') {
+                        if (!diskForm.server || !diskForm.path) { addToast('NFS server and path required', 'error'); return; }
+                        body.server = diskForm.server;
+                        body.path = diskForm.path;
+                        body.nfsversion = diskForm.nfsversion;
+                    } else if (diskForm.sr_type === 'iscsi') {
+                        if (!diskForm.target || !diskForm.iqn || !diskForm.scsi_id) { addToast('Target, IQN and SCSI ID required', 'error'); return; }
+                        body.target = diskForm.target;
+                        body.iqn = diskForm.iqn;
+                        body.scsi_id = diskForm.scsi_id;
+                        body.port = diskForm.port || 3260;
+                        if (diskForm.chap_user) { body.chap_user = diskForm.chap_user; body.chap_pass = diskForm.chap_pass; }
+                    } else if (diskForm.sr_type === 'lvm' || diskForm.sr_type === 'ext') {
+                        if (!diskForm.device) { addToast('Device required', 'error'); return; }
+                        body.device = diskForm.device;
+                    }
                 }
-                
+
                 if (!endpoint) {
                     addToast('Unknown storage type', 'error');
                     return;
@@ -748,6 +790,7 @@
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
                             <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
                                 <h3 className="font-semibold text-white">
+                                    {type === 'sr' && (t('createSr') || 'Create Storage Repository')}
                                     {type === 'lvm' && 'Create LVM Volume Group'}
                                     {type === 'lvmthin' && 'Create LVM-Thin Pool'}
                                     {type === 'zfs' && 'Create ZFS Pool'}
@@ -757,6 +800,105 @@
                             </div>
                             
                             <div className="p-4 space-y-4">
+                                {/* XCP-ng SR Creation Form */}
+                                {type === 'sr' && (
+                                    <>
+                                        <div>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('srType') || 'SR Type'} *</label>
+                                            <select value={diskForm.sr_type} onChange={e => setDiskForm({...diskForm, sr_type: e.target.value})}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                <option value="nfs">NFS</option>
+                                                <option value="iscsi">iSCSI (LVM over iSCSI)</option>
+                                                <option value="lvm">Local LVM</option>
+                                                <option value="ext">Local EXT</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('name')} *</label>
+                                            <input type="text" value={diskForm.name} onChange={e => setDiskForm({...diskForm, name: e.target.value})}
+                                                placeholder="my-storage" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                        </div>
+                                        {diskForm.sr_type === 'nfs' && (
+                                            <>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">NFS Server *</label>
+                                                        <input type="text" value={diskForm.server} onChange={e => setDiskForm({...diskForm, server: e.target.value})}
+                                                            placeholder="192.168.1.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('nfsVersion') || 'NFS Version'}</label>
+                                                        <select value={diskForm.nfsversion} onChange={e => setDiskForm({...diskForm, nfsversion: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                            <option value="3">NFSv3</option>
+                                                            <option value="4">NFSv4</option>
+                                                            <option value="4.1">NFSv4.1</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('exportPath') || 'Export Path'} *</label>
+                                                    <input type="text" value={diskForm.path} onChange={e => setDiskForm({...diskForm, path: e.target.value})}
+                                                        placeholder="/mnt/nfs/share" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                </div>
+                                            </>
+                                        )}
+                                        {diskForm.sr_type === 'iscsi' && (
+                                            <>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Target *</label>
+                                                        <input type="text" value={diskForm.target} onChange={e => setDiskForm({...diskForm, target: e.target.value})}
+                                                            placeholder="192.168.1.200" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Port</label>
+                                                        <input type="number" value={diskForm.port} onChange={e => setDiskForm({...diskForm, port: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">IQN *</label>
+                                                    <input type="text" value={diskForm.iqn} onChange={e => setDiskForm({...diskForm, iqn: e.target.value})}
+                                                        placeholder="iqn.2024-01.com.example:target" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">SCSI ID *</label>
+                                                    <input type="text" value={diskForm.scsi_id} onChange={e => setDiskForm({...diskForm, scsi_id: e.target.value})}
+                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                </div>
+                                                <details className="group">
+                                                    <summary className="text-sm text-gray-400 cursor-pointer">CHAP Authentication</summary>
+                                                    <div className="mt-2 grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">CHAP User</label>
+                                                            <input type="text" value={diskForm.chap_user} onChange={e => setDiskForm({...diskForm, chap_user: e.target.value})}
+                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">CHAP Password</label>
+                                                            <input type="password" value={diskForm.chap_pass} onChange={e => setDiskForm({...diskForm, chap_pass: e.target.value})}
+                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                    </div>
+                                                </details>
+                                            </>
+                                        )}
+                                        {(diskForm.sr_type === 'lvm' || diskForm.sr_type === 'ext') && (
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">Device *</label>
+                                                <select value={diskForm.device} onChange={e => setDiskForm({...diskForm, device: e.target.value})}
+                                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                    <option value="">Select disk...</option>
+                                                    {(data.disks||[]).filter(d => !d.used).map(d => (
+                                                        <option key={d.devpath} value={d.devpath}>{d.devpath} - {formatBytes(d.size)} ({d.type})</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+
                                 {/* Device Selection - for LVM, LVM-Thin (vg), Directory */}
                                 {(type === 'lvm' || type === 'directory') && (
                                     <div>
@@ -959,6 +1101,16 @@
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80">
                     <DiskCreateModal />
                     <div className="w-full max-w-6xl max-h-[90vh] bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl animate-scale-in overflow-hidden flex flex-col">
+                        {isCorporate ? (
+                        <div className="corp-modal-header">
+                            <span className="corp-modal-title" style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                                <Icons.Server className="w-4 h-4" style={{color:'#60b515'}} />
+                                {node}
+                                <span style={{fontSize:11,fontWeight:400,color:'#728b9a'}}>Proxmox Node</span>
+                            </span>
+                            <button className="corp-modal-close" onClick={onClose}><Icons.X className="w-4 h-4" /></button>
+                        </div>
+                        ) : (
                         <div className="flex items-center justify-between px-6 py-4 border-b border-proxmox-border bg-proxmox-dark">
                             <div className="flex items-center gap-3">
                                 <div className="p-2 rounded-lg bg-green-500/10"><Icons.Server /></div>
@@ -966,7 +1118,17 @@
                             </div>
                             <button onClick={onClose} className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400"><Icons.X /></button>
                         </div>
+                        )}
 
+                        {isCorporate ? (
+                        <div className="corp-tab-strip" style={{paddingLeft: 16}}>
+                            {tabs.map(tab => (
+                                <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={activeTab === tab.id ? 'active' : ''}>
+                                    <tab.icon style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />{tab.label}
+                                </button>
+                            ))}
+                        </div>
+                        ) : (
                         <div className="flex items-center gap-1 px-6 py-3 border-b border-proxmox-border bg-proxmox-dark/50 overflow-x-auto">
                             {tabs.map(tab => (
                                 <button key={tab.id} onClick={() => setActiveTab(tab.id)}
@@ -975,6 +1137,7 @@
                                 </button>
                             ))}
                         </div>
+                        )}
 
                         <div className="flex-1 overflow-y-auto p-6">
                             {loading ? (
@@ -1850,6 +2013,27 @@
                                                 </div>
                                             </div>
 
+                                            {isXcpng ? (
+                                                /* XCP-ng: Storage Repositories - NS Mar 2026 */
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                        <h3 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.Database />
+                                                            {t('storageRepos') || 'Storage Repositories'}
+                                                        </h3>
+                                                        <button
+                                                            onClick={() => openDiskModal('sr')}
+                                                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                        >
+                                                            <Icons.Plus className="inline mr-1" /> {t('createSr') || 'Create SR'}
+                                                        </button>
+                                                    </div>
+                                                    <div className="p-4">
+                                                        <p className="text-xs text-gray-500 mb-3">{t('srHint') || 'Storage Repositories are managed via XAPI. Use the button above to create NFS, iSCSI, or local storage.'}</p>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <>
                                             {/* LVM Volume Groups */}
                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                 <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
@@ -1857,7 +2041,7 @@
                                                         <Icons.Database />
                                                         LVM Volume Groups
                                                     </h3>
-                                                    <button 
+                                                    <button
                                                         onClick={() => openDiskModal('lvm')}
                                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                     >
@@ -1876,7 +2060,7 @@
                                                                     {v.free && v.size && (
                                                                         <>
                                                                             <div className="h-2 bg-proxmox-darker rounded-full overflow-hidden">
-                                                                                <div 
+                                                                                <div
                                                                                     className="h-full bg-proxmox-orange rounded-full"
                                                                                     style={{ width: `${Math.round((1 - v.free/v.size) * 100)}%` }}
                                                                                 />
@@ -1900,7 +2084,7 @@
                                                         <Icons.Database />
                                                         LVM-Thin Pools
                                                     </h3>
-                                                    <button 
+                                                    <button
                                                         onClick={() => openDiskModal('lvmthin')}
                                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                     >
@@ -1918,7 +2102,7 @@
                                                                     </div>
                                                                     <div className="text-xs text-gray-500 mb-2">VG: {p.vg || '?'}</div>
                                                                     <div className="h-2 bg-proxmox-darker rounded-full overflow-hidden">
-                                                                        <div 
+                                                                        <div
                                                                             className={`h-full rounded-full ${(p.usage||0) > 80 ? 'bg-red-500' : (p.usage||0) > 60 ? 'bg-yellow-500' : 'bg-green-500'}`}
                                                                             style={{ width: `${p.usage || 0}%` }}
                                                                         />
@@ -1939,13 +2123,13 @@
                                                         ZFS Pools
                                                     </h3>
                                                     <div className="flex gap-2">
-                                                        <button 
+                                                        <button
                                                             onClick={() => openDiskModal('directory')}
                                                             className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-sm"
                                                         >
                                                             <Icons.Folder className="inline mr-1" /> Directory
                                                         </button>
-                                                        <button 
+                                                        <button
                                                             onClick={() => openDiskModal('zfs')}
                                                             className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
                                                         >
@@ -1972,7 +2156,7 @@
                                                                     {z.alloc && z.size && (
                                                                         <>
                                                                             <div className="h-2 bg-proxmox-darker rounded-full overflow-hidden">
-                                                                                <div 
+                                                                                <div
                                                                                     className="h-full bg-blue-500 rounded-full"
                                                                                     style={{ width: `${Math.round((z.alloc/z.size) * 100)}%` }}
                                                                                 />
@@ -1988,6 +2172,8 @@
                                                     ) : <div className="text-gray-500 text-sm text-center py-4">No ZFS Pools</div>}
                                                 </div>
                                             </div>
+                                                </>
+                                            )}
                                         </div>
                                     )}
 
@@ -2744,6 +2930,13 @@
                             rfbInstance.sendCredentials({ password: vncPassword });
                         });
 
+                        // clipboard sync from remote VM
+                        rfbInstance.addEventListener('clipboard', (e) => {
+                            if (e.detail?.text) {
+                                navigator.clipboard.writeText(e.detail.text).catch(() => {});
+                            }
+                        });
+
                         setRfb(rfbInstance);
                         rfbRef.current = rfbInstance;
                         
@@ -2768,6 +2961,26 @@
                 };
             }, [consoleInfo, clusterId, vm]);
 
+            // resize handling - observer for container changes, window event for monitor switches
+            useEffect(() => {
+                if (!rfb || !canvasRef.current) return;
+
+                const triggerResize = () => {
+                    if (rfbRef.current) {
+                        rfbRef.current.scaleViewport = true;
+                    }
+                };
+
+                const observer = new ResizeObserver(triggerResize);
+                observer.observe(canvasRef.current);
+                window.addEventListener('resize', triggerResize);
+
+                return () => {
+                    observer.disconnect();
+                    window.removeEventListener('resize', triggerResize);
+                };
+            }, [rfb]);
+
             const handleFullscreen = () => {
                 if(!document.fullscreenElement) {
                     containerRef.current?.requestFullscreen();
@@ -2784,8 +2997,27 @@
                 }
             };
 
+            // NS: type text into VM as keypresses - clipboardPasteFrom only sets VNC clipboard
+            // buffer which needs guest agent, this actually works everywhere
+            const typeTextToVM = (conn, text) => {
+                for (const ch of text) {
+                    const code = ch.charCodeAt(0);
+                    if (code === 10 || code === 13) {
+                        conn.sendKey(0xFF0D); // Return
+                    } else if (code === 9) {
+                        conn.sendKey(0xFF09); // Tab
+                    } else if (code >= 0x20 && code <= 0x7E) {
+                        conn.sendKey(code); // ASCII printable = X11 keysym
+                    } else if (code > 0x00A0) {
+                        conn.sendKey(0x01000000 + code); // Unicode
+                    }
+                }
+            };
+
             const openInProxmox = () => {
-                const url = `https://${consoleInfo.host}:8006/?console=${vm.type}&novnc=1&vmid=${vm.vmid}&node=${vm.node}`;
+                // NS: IPv6 needs brackets in URLs
+                const h = consoleInfo.host.includes(':') && !consoleInfo.host.startsWith('[') ? `[${consoleInfo.host}]` : consoleInfo.host;
+                const url = `https://${h}:8006/?console=${vm.type}&novnc=1&vmid=${vm.vmid}&node=${vm.node}`;
                 window.open(url, '_blank');
             };
 
@@ -2824,6 +3056,20 @@
                                         className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                     >
                                         Ctrl+Alt+Del
+                                    </button>
+                                )}
+                                {connectionStatus === 'connected' && (
+                                    <button
+                                        onClick={() => {
+                                            const conn = rfbRef.current;
+                                            if (!conn) return;
+                                            const text = prompt('Paste text:');
+                                            if (text) typeTextToVM(conn, text);
+                                        }}
+                                        className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                        title={t('pasteClipboard') || 'Paste from clipboard'}
+                                    >
+                                        <Icons.ClipboardList className="w-3.5 h-3.5 inline mr-1" />Paste
                                     </button>
                                 )}
                                 <button
@@ -3111,9 +3357,9 @@
             return (
                 <div className="space-y-0">
                     {/* Header Bar */}
-                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: '#22343c'}}>
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: 'var(--corp-header-bg)'}}>
                         <div className="flex items-center gap-2">
-                            <button onClick={onBack} className="p-1 hover:text-white" style={{color: '#adbbc4'}} title={t('backToList')}>
+                            <button onClick={onBack} className="p-1 hover:text-white" style={{color: 'var(--corp-text-secondary)'}} title={t('backToList')}>
                                 <Icons.ChevronLeft className="w-4 h-4" />
                             </button>
                             <Icons.Server className="w-4 h-4" style={{color: nodeOnline ? '#49afd9' : '#f54f47'}} />
@@ -3130,20 +3376,20 @@
                                 </button>
                                 {showActionsMenu && (
                                     <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
-                                        <button onClick={() => { onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                        <button onClick={() => { if(!confirm(`${isMaint ? 'Disable' : 'Enable'} maintenance mode on "${node}"?`)) return; onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.Wrench className="w-3.5 h-3.5" /> {isMaint ? t('disableMaintenance') || 'Disable Maintenance' : t('maintenance')}
                                         </button>
-                                        <button onClick={() => { onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                        <button onClick={() => { if(!confirm(`Reboot node "${node}"?`)) return; onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.RefreshCw className="w-3.5 h-3.5" /> {t('rebootNode')}
                                         </button>
-                                        <button onClick={() => { onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                        <button onClick={() => { if(!confirm(`Shutdown node "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
                                             <Icons.Power className="w-3.5 h-3.5" /> {t('shutdownNode')}
                                         </button>
-                                        <button onClick={() => { onStartUpdate(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                        <button onClick={() => { onStartUpdate(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.Download className="w-3.5 h-3.5" /> {t('update') || 'Update'}
                                         </button>
-                                        <div className="my-1" style={{borderTop: '1px solid #485764'}}></div>
-                                        <button onClick={() => { onOpenNodeConfig(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                        <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                                        <button onClick={() => { onOpenNodeConfig(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.Settings className="w-3.5 h-3.5" /> {t('nodeSettings')}
                                         </button>
                                     </div>
@@ -3153,7 +3399,7 @@
                     </div>
 
                     {/* Tab Strip */}
-                    <div className="corp-tab-strip px-4" style={{background: '#22343c'}}>
+                    <div className="corp-tab-strip px-4">
                         {['summary', 'monitor', 'configure', 'vms', 'shell', 'subscription'].map(tab => (
                             <button key={tab} className={activeDetailTab === tab ? 'active' : ''} onClick={() => setActiveDetailTab(tab)}>
                                 {tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo')}
@@ -3173,9 +3419,9 @@
                         {activeDetailTab === 'summary' && (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                 {/* Host Details card */}
-                                <div style={{border: '1px solid #485764'}}>
-                                    <div className="px-3 py-2" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
-                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('hostDetails')}</span>
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hostDetails')}</span>
                                     </div>
                                     <table className="corp-property-grid">
                                         <tbody>
@@ -3192,9 +3438,9 @@
                                 </div>
 
                                 {/* Capacity & Usage card */}
-                                <div style={{border: '1px solid #485764'}}>
-                                    <div className="px-3 py-2" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
-                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('capacityUsage')}</span>
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('capacityUsage')}</span>
                                     </div>
                                     <div className="p-3 space-y-3">
                                         {[
@@ -3205,8 +3451,8 @@
                                         ].map(item => (
                                             <div key={item.label}>
                                                 <div className="flex items-center justify-between mb-1">
-                                                    <span className="text-[12px]" style={{color: '#adbbc4'}}>{item.label}</span>
-                                                    <span className="text-[12px]" style={{color: '#e9ecef'}}>{item.used} / {item.total}</span>
+                                                    <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{item.label}</span>
+                                                    <span className="text-[12px]" style={{color: 'var(--color-text)'}}>{item.used} / {item.total}</span>
                                                 </div>
                                                 <div className="corp-capacity-bar">
                                                     <div style={{width: `${Math.min(item.percent, 100)}%`, background: item.color}}></div>
@@ -3217,9 +3463,9 @@
                                 </div>
 
                                 {/* Hardware card */}
-                                <div style={{border: '1px solid #485764'}}>
-                                    <div className="px-3 py-2" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
-                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('hardwareInfo')}</span>
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hardwareInfo')}</span>
                                     </div>
                                     <table className="corp-property-grid">
                                         <tbody>
@@ -3232,9 +3478,9 @@
                                 </div>
 
                                 {/* Related Objects card */}
-                                <div style={{border: '1px solid #485764'}}>
-                                    <div className="px-3 py-2" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
-                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('relatedObjects')}</span>
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('relatedObjects')}</span>
                                     </div>
                                     <table className="corp-property-grid">
                                         <tbody>
@@ -3259,7 +3505,7 @@
                                     {monitorSubTab === 'performance' && (
                                         <div className="space-y-4">
                                             <div className="flex items-center justify-between">
-                                                <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('performance')}</span>
+                                                <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('performance')}</span>
                                                 <div className="flex gap-1">
                                                     {['hour', 'day', 'week', 'month', 'year'].map(tf => (
                                                         <button key={tf} onClick={() => handlePerfTimeframeChange(tf)}
@@ -3347,7 +3593,7 @@
                                             {configSubTab === 'network' && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('network')}</span>
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('network')}</span>
                                                         <div className="flex gap-1">
                                                             <div className="relative">
                                                                 <button onClick={() => setData(prev => ({...prev, showCreateMenu: !prev.showCreateMenu}))}
@@ -3355,10 +3601,10 @@
                                                                     <Icons.Plus className="w-3 h-3" /> Create
                                                                 </button>
                                                                 {data.showCreateMenu && (
-                                                                    <div className="absolute top-full right-0 mt-1 z-10 min-w-[160px]" style={{background: '#22343c', border: '1px solid #485764'}}>
+                                                                    <div className="absolute top-full right-0 mt-1 z-10 min-w-[160px]" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
                                                                         {['bridge', 'bond', 'vlan', 'OVSBridge', 'OVSBond', 'OVSIntPort'].map(ifType => (
                                                                             <button key={ifType} onClick={() => setData(prev => ({...prev, showCreateMenu: false, editIface: { type: ifType, iface: '', isNew: true }}))}
-                                                                                className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[#324f61]" style={{color: '#adbbc4'}}>
+                                                                                className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[#324f61]" style={{color: 'var(--corp-text-secondary)'}}>
                                                                                 Linux {ifType.charAt(0).toUpperCase() + ifType.slice(1)}
                                                                             </button>
                                                                         ))}
@@ -3405,9 +3651,9 @@
                                                     {/* LW: Feb 2026 - edit/create interface modal */}
                                                     {data.editIface && (
                                                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{background: 'rgba(0,0,0,0.7)'}}>
-                                                            <div className="w-full max-w-xl" style={{background: '#1b2a32', border: '1px solid #485764'}}>
-                                                                <div className="px-4 py-3 flex items-center justify-between" style={{borderBottom: '1px solid #485764', background: '#22343c'}}>
-                                                                    <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>
+                                                            <div className="w-full max-w-xl" style={{background: 'var(--corp-bar-track)', border: '1px solid var(--corp-border-medium)'}}>
+                                                                <div className="px-4 py-3 flex items-center justify-between" style={{borderBottom: '1px solid var(--corp-border-medium)', background: 'var(--corp-header-bg)'}}>
+                                                                    <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>
                                                                         {data.editIface.isNew ? `Create: Linux ${data.editIface.type}` : `Edit: ${data.editIface.iface}`}
                                                                     </span>
                                                                     <button onClick={() => setData(prev => ({...prev, editIface: null}))} style={{color: '#728b9a'}}><Icons.X className="w-4 h-4" /></button>
@@ -3577,7 +3823,7 @@
                                             {configSubTab === 'dns' && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('dns')}</span>
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('dns')}</span>
                                                         {!editingDns ? (
                                                             <button onClick={() => { setEditingDns(true); setDnsForm({ search: data.dns?.search || '', dns1: data.dns?.dns1 || '', dns2: data.dns?.dns2 || '', dns3: data.dns?.dns3 || '' }); }}
                                                                 className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{t('edit')}</button>
@@ -3611,7 +3857,7 @@
                                             {configSubTab === 'hosts' && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('hostsFile')}</span>
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hostsFile')}</span>
                                                         {!editingHosts ? (
                                                             <button onClick={() => { setEditingHosts(true); setHostsForm(data.hosts || ''); }}
                                                                 className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{t('edit')}</button>
@@ -3627,7 +3873,7 @@
                                                         <textarea value={hostsForm} onChange={e => setHostsForm(e.target.value)} rows={8}
                                                             className="w-full px-3 py-2 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" style={{resize: 'vertical'}} />
                                                     ) : (
-                                                        <pre className="text-[12px] p-3 overflow-auto" style={{background: '#17242b', border: '1px solid #485764', color: '#adbbc4', fontFamily: 'monospace', maxHeight: '300px'}}>{data.hosts || 'No data'}</pre>
+                                                        <pre className="text-[12px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '300px'}}>{data.hosts || 'No data'}</pre>
                                                     )}
                                                 </div>
                                             )}
@@ -3646,7 +3892,7 @@
                                                                             handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'));
                                                                         }}
                                                                         className="px-2 py-0.5 text-[13px] bg-transparent border rounded text-white"
-                                                                        style={{borderColor: '#485764'}}
+                                                                        style={{borderColor: 'var(--corp-border-medium)'}}
                                                                     >
                                                                         {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
                                                                     </select>
@@ -3661,15 +3907,15 @@
                                             {configSubTab === 'certs' && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('certificates')}</span>
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('certificates')}</span>
                                                         <button onClick={() => setShowCertUpload(!showCertUpload)}
                                                             className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{showCertUpload ? t('cancel') : 'Upload'}</button>
                                                     </div>
                                                     {showCertUpload && (
-                                                        <div className="mb-3 p-3 space-y-2" style={{background: '#17242b', border: '1px solid #485764'}}>
+                                                        <div className="mb-3 p-3 space-y-2" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
                                                             <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Certificate (PEM)</label><textarea value={certForm.cert} onChange={e => setCertForm({...certForm, cert: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN CERTIFICATE-----" /></div>
                                                             <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Private Key (PEM)</label><textarea value={certForm.key} onChange={e => setCertForm({...certForm, key: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN PRIVATE KEY-----" /></div>
-                                                            <label className="flex items-center gap-2 text-[12px]" style={{color: '#adbbc4'}}><input type="checkbox" checked={certForm.restart} onChange={e => setCertForm({...certForm, restart: e.target.checked})} /> Restart pveproxy after upload</label>
+                                                            <label className="flex items-center gap-2 text-[12px]" style={{color: 'var(--corp-text-secondary)'}}><input type="checkbox" checked={certForm.restart} onChange={e => setCertForm({...certForm, restart: e.target.checked})} /> Restart pveproxy after upload</label>
                                                             <button onClick={handleCertUpload} disabled={saving || !certForm.cert || !certForm.key}
                                                                 className="px-3 py-1.5 text-[12px] disabled:opacity-40" style={{color: '#fff', background: '#49afd9', border: 'none'}}>{saving ? '...' : 'Upload Certificate'}</button>
                                                         </div>
@@ -3693,12 +3939,12 @@
                                             {configSubTab === 'syslog' && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('syslog')}</span>
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('syslog')}</span>
                                                         <button onClick={() => loadTabData('system')} className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
                                                             <Icons.RefreshCw className="w-3 h-3" /> Refresh
                                                         </button>
                                                     </div>
-                                                    <pre className="text-[11px] p-3 overflow-auto" style={{background: '#17242b', border: '1px solid #485764', color: '#adbbc4', fontFamily: 'monospace', maxHeight: '400px'}}>
+                                                    <pre className="text-[11px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '400px'}}>
                                                         {Array.isArray(data.syslog) ? data.syslog.map(l => l.t || l.n || l).join('\n') : (data.syslog || 'No data')}
                                                     </pre>
                                                 </div>
@@ -3767,7 +4013,7 @@
                                             {configSubTab === 'repos' && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('repositories')}</span>
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('repositories')}</span>
                                                         <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' }); addToast(res && res.ok ? 'apt update started' : 'Error', res && res.ok ? 'success' : 'error'); }}
                                                             className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
                                                             <Icons.RefreshCw className="w-3 h-3" /> apt update

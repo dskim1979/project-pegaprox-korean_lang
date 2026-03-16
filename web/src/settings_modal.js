@@ -3,7 +3,7 @@
         // PegaProxSettingsModal (Server, SSL, SMTP, RBAC, Audit, Tenants)
         // ═══════════════════════════════════════════════
         // PegaProx Settings Modal with User Management and Audit Log
-        function PegaProxSettingsModal({ isOpen, onClose, addToast }) {
+        function PegaProxSettingsModal({ isOpen, onClose, addToast, onGroupsChanged }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user: currentUser } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - Corporate styling
@@ -30,6 +30,8 @@
             const [showAddGroup, setShowAddGroup] = useState(false);
             const [newGroup, setNewGroup] = useState({ name: '', description: '', color: '#E86F2D' });
             const [editingGroup, setEditingGroup] = useState(null);
+            const [renamingCluster, setRenamingCluster] = useState(null);
+            const [renameValue, setRenameValue] = useState('');
             
             // MK: Feb 2026 - LDAP/AD settings
             const [ldapConfig, setLdapConfig] = useState({
@@ -131,6 +133,7 @@
                 logo_url: '',
                 app_name: 'PegaProx',
                 default_theme: 'proxmoxDark',  // NS: Default theme for new users - Jan 2026
+                login_background: '',
                 // NS: SMTP Settings - Dec 2025
                 smtp_enabled: false,
                 smtp_host: '',
@@ -152,6 +155,7 @@
             const [acmeLoading, setAcmeLoading] = useState(false);
             const [acmeResult, setAcmeResult] = useState(null);
             const [testEmailAddress, setTestEmailAddress] = useState('');
+            const [loginBgFile, setLoginBgFile] = useState(null);
             
             // Password policy state - NS Jan 2026
             const [passwordPolicy, setPasswordPolicy] = useState({
@@ -255,6 +259,33 @@
                 } catch(e) { console.error('fetchClusterGroups error:', e); }
             };
             
+            // rename cluster - NS Mar 2026
+            const handleRenameCluster = async () => {
+                if (!renamingCluster) return;
+                const newName = renameValue.trim();
+                const confirmMsg = newName
+                    ? `${t('confirmRename') || 'Rename cluster to'} "${newName}"?`
+                    : `${t('confirmResetName') || 'Reset cluster name to original'}?`;
+                if (!confirm(confirmMsg)) return;
+                try {
+                    const r = await fetch(`${API_URL}/clusters/${renamingCluster.id}/rename`, {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ display_name: newName })
+                    });
+                    if (r.ok) {
+                        addToast(newName ? `Cluster renamed to "${newName}"` : 'Cluster name reset', 'success');
+                        setRenamingCluster(null);
+                        fetchClusters();
+                        onGroupsChanged?.();
+                    } else {
+                        const err = await r.json().catch(() => ({}));
+                        addToast(err.error || 'Rename failed', 'error');
+                    }
+                } catch(e) { addToast('Rename failed', 'error'); }
+            };
+
             // fetch all roles (builtin + custom) - NS
             const fetchRoles = async () => {
                 try {
@@ -878,6 +909,7 @@
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
                             trusted_proxies: data.trusted_proxies || '',
                             default_theme: data.default_theme || 'proxmoxDark',
+                            login_background: data.login_background || '',
                             // SMTP settings
                             smtp_enabled: data.smtp_enabled || false,
                             smtp_host: data.smtp_host || '',
@@ -1073,6 +1105,9 @@
                     if (serverSettings.ssl_key_file) {
                         formData.append('ssl_key', serverSettings.ssl_key_file);
                     }
+                    if (loginBgFile) {
+                        formData.append('login_background', loginBgFile);
+                    }
                     
                     const response = await fetch(`${API_URL}/settings/server`, {
                         method: 'POST',
@@ -1086,6 +1121,7 @@
                         if (data.restart_required) {
                             addToast(t('restartRequired'), 'info');
                         }
+                        setLoginBgFile(null);
                         fetchServerSettings();
                     } else {
                         const err = await response.json();
@@ -1566,25 +1602,32 @@
                         onClick={e => e.stopPropagation()}
                     >
                         {/* Header - LW: Feb 2026 - compact in corporate mode */}
-                        <div className={`border-b border-proxmox-border flex items-center justify-between ${isCorporate ? 'px-4 py-2' : 'p-6'}`}>
+                        {isCorporate ? (
+                        <div className="corp-modal-header">
+                            <span className="corp-modal-title" style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                                <Icons.Settings className="w-4 h-4" style={{color:'#728b9a'}} />
+                                {t('pegaproxSettings')}
+                            </span>
+                            <button className="corp-modal-close" onClick={onClose}><Icons.X className="w-4 h-4" /></button>
+                        </div>
+                        ) : (
+                        <div className="border-b border-proxmox-border flex items-center justify-between p-6">
                             <div className="flex items-center gap-3">
-                                {!isCorporate && (
-                                    <div className="w-10 h-10 rounded-xl bg-proxmox-orange/20 flex items-center justify-center">
-                                        <Icons.Settings />
-                                    </div>
-                                )}
+                                <div className="w-10 h-10 rounded-xl bg-proxmox-orange/20 flex items-center justify-center">
+                                    <Icons.Settings />
+                                </div>
                                 <div>
-                                    <h2 className={isCorporate ? 'text-sm font-semibold text-white' : 'text-xl font-bold text-white'}>
-                                        {isCorporate && <Icons.Settings className="w-4 h-4 inline mr-2 text-gray-400" />}
+                                    <h2 className="text-xl font-bold text-white">
                                         {t('pegaproxSettings')}
                                     </h2>
-                                    {!isCorporate && <p className="text-sm text-gray-400">PegaProx {PEGAPROX_VERSION}</p>}
+                                    <p className="text-sm text-gray-400">PegaProx {PEGAPROX_VERSION}</p>
                                 </div>
                             </div>
                             <button onClick={onClose} className="p-1.5 hover:bg-proxmox-dark text-gray-400 hover:text-white">
-                                <Icons.X className={isCorporate ? 'w-4 h-4' : undefined} />
+                                <Icons.X />
                             </button>
                         </div>
+                        )}
                         
                         {/* Settings tabs */}
                         {/* Multi-tenancy was requested on r/selfhosted - turns out MSPs really need this */}
@@ -1594,7 +1637,7 @@
                                 onClick={() => setActiveTab('users')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'users'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1606,7 +1649,7 @@
                                 onClick={() => setActiveTab('tenants')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'tenants'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1617,7 +1660,7 @@
                                 onClick={() => setActiveTab('groups')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'groups'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1629,7 +1672,7 @@
                                 onClick={() => setActiveTab('permissions')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'permissions'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1640,7 +1683,7 @@
                                 onClick={() => setActiveTab('roles')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'roles'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1651,7 +1694,7 @@
                                 onClick={() => setActiveTab('security')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'security'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1663,7 +1706,7 @@
                                 onClick={() => setActiveTab('ldap')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'ldap'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1674,7 +1717,7 @@
                                 onClick={() => setActiveTab('oidc')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'oidc'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1685,7 +1728,7 @@
                                 onClick={() => setActiveTab('compliance')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'compliance'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1697,7 +1740,7 @@
                                 onClick={() => setActiveTab('server')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'server'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1708,7 +1751,7 @@
                                 onClick={() => setActiveTab('audit')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'audit'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1720,7 +1763,7 @@
                                 onClick={() => { setActiveTab('updates'); checkForUpdates(); }}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'updates'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1734,7 +1777,7 @@
                                 onClick={() => setActiveTab('about')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'about'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -1745,7 +1788,7 @@
                                 onClick={() => setActiveTab('support')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
                                     activeTab === 'support'
-                                        ? (isCorporate ? 'text-white border-b-2 border-blue-500 font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
                                         : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
                                 }`}
                             >
@@ -2402,6 +2445,7 @@
                                                                                 if(r.ok) {
                                                                                     addToast('Group deleted', 'success');
                                                                                     fetchClusterGroups();
+                                                                                    onGroupsChanged?.();
                                                                                 } else {
                                                                                     const err = await r.json();
                                                                                     addToast(err.error || 'Error', 'error');
@@ -2433,6 +2477,81 @@
                                         )}
                                     </div>
                                     
+                                    {/* All Clusters — rename + group assignment */}
+                                    <div className="mt-6">
+                                        <h3 className="text-lg font-semibold text-white mb-3">{t('allClusters') || 'All Clusters'}</h3>
+                                        <div className="space-y-2">
+                                            {clusters.length === 0 ? (
+                                                <p className="text-gray-500 text-sm py-4 text-center">{t('noClustersAdded') || 'No clusters added yet'}</p>
+                                            ) : clusters.map(c => {
+                                                const grp = clusterGroups.find(g => g.id === c.group_id);
+                                                return (
+                                                    <div key={c.id} className="flex items-center justify-between bg-proxmox-dark border border-proxmox-border rounded-lg px-4 py-3">
+                                                        <div className="flex items-center gap-3 min-w-0">
+                                                            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${c.enabled !== false ? 'bg-green-500' : 'bg-gray-500'}`} />
+                                                            <div className="min-w-0">
+                                                                <div className="text-sm font-medium text-white truncate">
+                                                                    {c.display_name || c.name || c.host}
+                                                                    {c.display_name && c.display_name !== c.name && (
+                                                                        <span className="ml-2 text-xs text-gray-500">({c.name})</span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="text-xs text-gray-500 flex items-center gap-2">
+                                                                    <span>{c.host}</span>
+                                                                    {grp && <span className="px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: (grp.color || '#E86F2D') + '30', color: grp.color }}>{grp.name}</span>}
+                                                                    {c.cluster_type && c.cluster_type !== 'proxmox' && <span className="text-yellow-500">{c.cluster_type.toUpperCase()}</span>}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => { setRenamingCluster(c); setRenameValue(c.display_name || c.name || ''); }}
+                                                            className="p-1.5 text-gray-400 hover:text-white hover:bg-proxmox-hover rounded flex-shrink-0"
+                                                            title={t('renameCluster') || 'Rename cluster'}
+                                                        >
+                                                            <Icons.Edit className="w-4 h-4" />
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    {/* Rename Cluster Modal */}
+                                    {renamingCluster && (
+                                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setRenamingCluster(null)}>
+                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+                                                <h3 className="text-lg font-semibold mb-1">{t('renameCluster') || 'Rename Cluster'}</h3>
+                                                <p className="text-sm text-gray-400 mb-4">{renamingCluster.name} ({renamingCluster.host})</p>
+                                                <div className="space-y-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('displayName') || 'Display Name'}</label>
+                                                        <input
+                                                            type="text"
+                                                            value={renameValue}
+                                                            onChange={e => setRenameValue(e.target.value)}
+                                                            onKeyDown={e => { if(e.key === 'Enter' && renameValue.trim()) handleRenameCluster(); }}
+                                                            placeholder={renamingCluster.name}
+                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                            autoFocus
+                                                        />
+                                                        <p className="text-xs text-gray-500 mt-1">{t('renameHint') || 'Leave empty to reset to original name'}</p>
+                                                    </div>
+                                                </div>
+                                                <div className="flex justify-end gap-3 mt-5">
+                                                    <button onClick={() => setRenamingCluster(null)} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm">
+                                                        {t('cancel') || 'Cancel'}
+                                                    </button>
+                                                    <button
+                                                        onClick={handleRenameCluster}
+                                                        className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium"
+                                                    >
+                                                        {t('rename') || 'Rename'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Add/Edit Group Modal */}
                                     {(showAddGroup || editingGroup) && (
                                         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -2510,6 +2629,7 @@
                                                                     setEditingGroup(null);
                                                                     setNewGroup({ name: '', description: '', color: '#E86F2D' });
                                                                     fetchClusterGroups();
+                                                                    onGroupsChanged?.();
                                                                 } else {
                                                                     const err = await r.json();
                                                                     addToast(err.error || 'Error', 'error');
@@ -2535,6 +2655,22 @@
                                     </div>
                                     
                                     {/* Sub-tabs for permissions */}
+                                    {isCorporate ? (
+                                    <div className="corp-tab-strip">
+                                        <button onClick={() => setPermSubTab('users')} className={permSubTab === 'users' ? 'active' : ''}>
+                                            <Icons.User style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />
+                                            {t('userPermissions') || 'User Permissions'}
+                                        </button>
+                                        <button onClick={() => setPermSubTab('vms')} className={permSubTab === 'vms' ? 'active' : ''}>
+                                            <Icons.VM style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />
+                                            {t('vmPermissions') || 'VM Permissions'}
+                                        </button>
+                                        <button onClick={() => setPermSubTab('pools')} className={permSubTab === 'pools' ? 'active' : ''}>
+                                            <Icons.Layers style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />
+                                            {t('poolPermissions') || 'Pool Permissions'}
+                                        </button>
+                                    </div>
+                                    ) : (
                                     <div className="flex gap-2 border-b border-proxmox-border pb-2">
                                         <button
                                             onClick={() => setPermSubTab('users')}
@@ -2576,6 +2712,7 @@
                                             </div>
                                         </button>
                                     </div>
+                                    )}
                                     
                                     {/* User Permissions Sub-Tab */}
                                     {permSubTab === 'users' && (
@@ -4267,7 +4404,46 @@
                                             {t('currentDefault') || 'Current default'}: {PEGAPROX_THEMES[serverSettings.default_theme || 'proxmoxDark']?.name || 'Proxmox Dark'}
                                         </p>
                                     </div>
-                                    
+
+                                    {/* Login Background - NS Mar 2026 */}
+                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
+                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                            <Icons.Image />
+                                            {t('loginBackground')}
+                                        </h4>
+                                        <p className="text-sm text-gray-400">{t('loginBackgroundDesc')}</p>
+
+                                        {serverSettings.login_background && (
+                                            <div className="flex items-center gap-3">
+                                                <img src={serverSettings.login_background} alt="Login bg" className="h-16 rounded border border-proxmox-border object-cover" />
+                                                <button
+                                                    onClick={async () => {
+                                                        try {
+                                                            const r = await fetch(`${API_URL}/settings/login-background`, { method: 'DELETE', credentials: 'include' });
+                                                            if (r.ok) {
+                                                                addToast(t('loginBackgroundDeleted'), 'success');
+                                                                setServerSettings(prev => ({...prev, login_background: ''}));
+                                                            }
+                                                        } catch(e) { addToast('Error', 'error'); }
+                                                    }}
+                                                    className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-colors"
+                                                >
+                                                    {t('removeBackground')}
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        <input
+                                            type="file"
+                                            accept=".png,.jpg,.jpeg,.webp,.svg"
+                                            onChange={e => setLoginBgFile(e.target.files[0] || null)}
+                                            className="block w-full text-sm text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:bg-proxmox-orange/20 file:text-proxmox-orange hover:file:bg-proxmox-orange/30 file:cursor-pointer"
+                                        />
+                                        {loginBgFile && (
+                                            <p className="text-xs text-green-400">{loginBgFile.name} ({(loginBgFile.size / 1024).toFixed(0)} KB)</p>
+                                        )}
+                                    </div>
+
                                     {/* Domain & Port */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
                                         <h4 className="font-medium text-white flex items-center gap-2">
@@ -5438,6 +5614,28 @@
                                                 </div>
                                             </div>
                                             
+                                            {/* Translations */}
+                                            <div className="bg-proxmox-darker rounded-lg p-4">
+                                                <div className="flex items-start gap-4">
+                                                    <div className="w-12 h-12 rounded-lg bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
+                                                        <Icons.Globe className="w-6 h-6 text-yellow-400" />
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="font-medium text-white">Community Translations</h4>
+                                                        <p className="text-sm text-gray-400 mt-1">
+                                                            Thanks to community contributors for helping translate PegaProx into multiple languages.
+                                                        </p>
+                                                        <div className="flex flex-wrap gap-2 mt-2 text-[12px]">
+                                                            <a href="https://github.com/ColombianJoker" target="_blank" rel="noopener noreferrer"
+                                                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-proxmox-dark text-gray-300 hover:text-white transition-colors">
+                                                                <Icons.Github className="w-3 h-3" />
+                                                                <strong>ColombianJoker</strong> — Spanish (Latin America)
+                                                            </a>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
                                             {/* Other Credits */}
                                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center text-sm">
                                                 <div className="bg-proxmox-darker rounded-lg p-3">

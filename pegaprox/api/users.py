@@ -111,6 +111,10 @@ def update_user_preferences():
     # NS: TaskBar auto-expand preference - Feb 2026
     if 'taskbar_auto_expand' in data:
         user['taskbar_auto_expand'] = bool(data['taskbar_auto_expand'])
+
+    # LW: Mar 2026 - track if user has explicitly chosen a layout
+    if 'layout_chosen' in data:
+        user['layout_chosen'] = bool(data['layout_chosen'])
     
     # Save only this user, not all users
     db = get_db()
@@ -128,6 +132,7 @@ def update_user_preferences():
         'language': user.get('language', ''),
         'ui_layout': user.get('ui_layout', 'modern'),
         'taskbar_auto_expand': user.get('taskbar_auto_expand', True),
+        'layout_chosen': user.get('layout_chosen', False),
         'default_theme': default_theme
     })
 
@@ -411,7 +416,7 @@ def get_security_audit(cluster_id):
     manager = cluster_managers[cluster_id]
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         
         # Get nodes

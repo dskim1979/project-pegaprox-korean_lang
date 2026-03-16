@@ -741,6 +741,8 @@ ROLE_TEMPLATES = {
             # pools + replication
             'pool.view', 'pool.manage', 'pool.assign',
             'replication.view', 'replication.manage',
+            # site recovery - full access for tenant admins
+            'site_recovery.view', 'site_recovery.manage', 'site_recovery.failover',
         ]
     },
     'tenant_operator': {
@@ -758,6 +760,7 @@ ROLE_TEMPLATES = {
             'firewall.view',
             'pool.view', 'pool.assign',
             'replication.view',
+            'site_recovery.view',
         ]
     },
     'tenant_user': {
@@ -787,6 +790,7 @@ ROLE_TEMPLATES = {
             'firewall.view',
             'pool.view',
             'replication.view',
+            'site_recovery.view',
         ]
     },
     'vm_operator': {
@@ -843,6 +847,7 @@ ROLE_TEMPLATES = {
             'firewall.view',
             'pool.view',
             'replication.view',
+            'site_recovery.view',
             'admin.audit',  # MK: monitoring tools need audit logs
         ]
     },
@@ -895,6 +900,7 @@ ROLE_TEMPLATES = {
             'firewall.view',
             'pool.view',
             'replication.view',
+            'site_recovery.view',
             'admin.audit',
         ]
     },

@@ -113,8 +113,8 @@ class PegaProxDB:
                 f.write(aes_key)
             try:
                 os.chmod(aes_key_file, 0o600)
-            except:
-                pass
+            except Exception as e:
+                logging.warning(f"Could not set key file permissions: {e}")
             logging.info("Generated new AES-256-GCM encryption key (Military Grade)")
         
         self.aesgcm = AESGCM(aes_key)
@@ -136,8 +136,8 @@ class PegaProxDB:
                 f.write(fernet_key)
             try:
                 os.chmod(KEY_FILE, 0o600)
-            except:
-                pass
+            except Exception as e:
+                logging.warning(f"Could not set Fernet key file permissions: {e}")
             self.fernet = Fernet(fernet_key)
             logging.info("Generated legacy Fernet key (for compatibility)")
 
@@ -242,7 +242,8 @@ class PegaProxDB:
                 tenant_permissions TEXT DEFAULT '{}',
                 denied_permissions TEXT DEFAULT '[]',
                 oidc_sub TEXT DEFAULT '',
-                last_oidc_sync TEXT DEFAULT ''
+                last_oidc_sync TEXT DEFAULT '',
+                layout_chosen INTEGER DEFAULT 0
             )
         ''')
         
@@ -818,7 +819,14 @@ class PegaProxDB:
                     logging.info("Added last_oidc_sync column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add last_oidc_sync column: {e}")
-                    
+
+            if 'layout_chosen' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN layout_chosen INTEGER DEFAULT 0")
+                    logging.info("Added layout_chosen column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add layout_chosen column: {e}")
+
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
         
@@ -1097,6 +1105,64 @@ class PegaProxDB:
             ''')
         except Exception as e:
             logging.error(f"Error creating xcpng_pools tables: {e}")
+
+        # NS: Mar 2026 - Site Recovery Plans (#150)
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_plans (
+                    id TEXT PRIMARY KEY,
+                    group_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    source_cluster TEXT NOT NULL,
+                    target_cluster TEXT NOT NULL,
+                    network_mappings TEXT DEFAULT '{}',
+                    storage_mappings TEXT DEFAULT '{}',
+                    auto_failover INTEGER DEFAULT 0,
+                    failover_timeout INTEGER DEFAULT 120,
+                    pre_failover_webhook TEXT DEFAULT '',
+                    post_failover_webhook TEXT DEFAULT '',
+                    status TEXT DEFAULT 'ready',
+                    last_test TEXT,
+                    last_failover TEXT,
+                    last_readiness_check TEXT,
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_vms (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    vm_name TEXT DEFAULT '',
+                    vm_type TEXT DEFAULT 'qemu',
+                    boot_group INTEGER DEFAULT 0,
+                    boot_delay INTEGER DEFAULT 30,
+                    replication_job_id TEXT DEFAULT '',
+                    target_vmid INTEGER,
+                    notes TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_events (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    started_at TEXT,
+                    completed_at TEXT,
+                    details TEXT DEFAULT '{}',
+                    triggered_by TEXT DEFAULT ''
+                )
+            ''')
+            # indexes for common queries
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_plan ON site_recovery_vms(plan_id, vmid)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_events_plan ON site_recovery_events(plan_id, started_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_plans_status ON site_recovery_plans(status)')
+            logging.info("Ensured site_recovery tables exist")
+        except Exception as e:
+            logging.error(f"Error creating site_recovery tables: {e}")
 
         conn.commit()
         logging.info("DB schema initialized")
@@ -2256,8 +2322,9 @@ class PegaProxDB:
                 'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
                 'oidc_sub': row_dict.get('oidc_sub', ''),
                 'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
+                'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
             }
-        
+
         return users
     
     def get_user(self, username: str) -> dict:
@@ -2308,6 +2375,7 @@ class PegaProxDB:
             'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
             'oidc_sub': row_dict.get('oidc_sub', ''),
             'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
+            'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
         }
     
     def save_user(self, username: str, data: dict):
@@ -2317,17 +2385,19 @@ class PegaProxDB:
         
         cursor.execute('''
             INSERT OR REPLACE INTO users
-            (username, password_salt, password_hash, role, permissions, tenant, 
-             created_at, last_login, password_expiry, 
+            (username, password_salt, password_hash, role, permissions, tenant,
+             created_at, last_login, password_expiry,
              totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
              enabled, theme, language, ui_layout, taskbar_auto_expand,
              auth_source, display_name, email, ldap_dn, last_ldap_sync,
-             tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync)
-            VALUES (?, ?, ?, ?, ?, ?, 
-                    COALESCE((SELECT created_at FROM users WHERE username = ?), ?), 
+             tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
+             layout_chosen)
+            VALUES (?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?)
+                    ?, ?, ?, ?,
+                    ?)
         ''', (
             username,
             data.get('password_salt', ''),
@@ -2357,6 +2427,7 @@ class PegaProxDB:
             json.dumps(data.get('denied_permissions', [])),
             data.get('oidc_sub', ''),
             data.get('last_oidc_sync', ''),
+            1 if data.get('layout_chosen', False) else 0,
         ))
         self.conn.commit()
     

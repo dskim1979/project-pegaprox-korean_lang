@@ -65,6 +65,20 @@ class XcpngManager:
         'suspended': 'VM suspended',
     }
 
+    # NS: built-in template mapping for VM creation from scratch
+    # keys match the os_type dropdown in the frontend
+    _OS_TEMPLATE_MAP = {
+        'linux': 'Other install media',
+        'windows': 'Windows 10 (64-bit)',
+        'windows11': 'Windows 11 (64-bit)',
+        'ubuntu': 'Ubuntu Focal Fossa 20.04',
+        'debian': 'Debian Bullseye 11',
+        'centos': 'CentOS 8',
+        'rhel': 'Red Hat Enterprise Linux 8',
+        'sles': 'SUSE Linux Enterprise Server 15',
+        'other': 'Other install media',
+    }
+
     def __init__(self, cluster_id: str, config):
         self.id = cluster_id
         self.config = config
@@ -109,6 +123,11 @@ class XcpngManager:
         # task tracking - xapi opaque refs -> our task dicts
         self._active_tasks = {}
         self._task_lock = threading.Lock()
+
+        # load balancing - MK Mar 2026
+        from collections import defaultdict
+        self._node_metrics_history = defaultdict(list)
+        self._last_balance_check = 0
 
         # logging - per cluster, same as PegaProxManager
         self.logger = logging.getLogger(f"XCPng_{config.name}")
@@ -235,6 +254,16 @@ class XcpngManager:
                     self._refresh_cache()
                     self._poll_tasks()
                     self.last_run = datetime.now()
+                    # MK: balance check on separate timer
+                    now_t = time.time()
+                    interval_cfg = getattr(self.config, 'check_interval', 300)
+                    auto_migrate = getattr(self.config, 'auto_migrate', False)
+                    if auto_migrate and now_t - self._last_balance_check >= interval_cfg:
+                        try:
+                            self.run_balance_check()
+                        except Exception as be:
+                            self.logger.error(f"[BALANCE] check error: {be}")
+                        self._last_balance_check = now_t
                 else:
                     # throttle reconnect attempts
                     now = time.time()
@@ -268,6 +297,25 @@ class XcpngManager:
             self._nodes_cache_time = now
             self._vms_cache_time = now
             self._consecutive_failures = 0
+
+            # collect metrics for predictive analysis
+            for n in (self._cached_nodes or []):
+                hostname = n.get('node', '')
+                if not hostname:
+                    continue
+                maxmem = n.get('maxmem', 0)
+                mem_used = n.get('mem', 0)
+                cpu_frac = n.get('cpu', 0)
+                snapshot = {
+                    'ts': now,
+                    'cpu': round(float(cpu_frac) * 100, 1) if cpu_frac == cpu_frac else 0,
+                    'mem': round(mem_used / maxmem * 100, 1) if maxmem else 0,
+                }
+                hist = self._node_metrics_history[hostname]
+                hist.append(snapshot)
+                # cap at 1000 entries
+                if len(hist) > 1000:
+                    self._node_metrics_history[hostname] = hist[-1000:]
         except Exception as e:
             self.logger.error(f"Cache refresh failed: {e}")
             self._consecutive_failures += 1
@@ -335,6 +383,21 @@ class XcpngManager:
                 except Exception:
                     pass
 
+            # load average from XAPI data source
+            loadavg = None
+            try:
+                la = float(api.host.query_data_source(ref, 'loadavg'))
+                if la == la:
+                    loadavg = [round(la, 2)]
+            except Exception:
+                pass
+
+            # software version for display
+            sw_ver = rec.get('software_version', {})
+            product_ver = sw_ver.get('product_version', '')
+            product_brand = sw_ver.get('product_brand', 'XCP-ng')
+            xen_ver = sw_ver.get('xen', '')
+
             # LW: frontend expects cumulative byte counters (like Proxmox), not rates
             # accumulate rate * dt to simulate cumulative values
             hostname = _sanitize_str(rec.get('hostname', rec.get('name_label', '')))
@@ -350,7 +413,9 @@ class XcpngManager:
 
             nodes.append({
                 'node': hostname,
-                'status': 'online' if rec.get('enabled', True) else 'offline',
+                # NS: enabled=false means maintenance in XAPI, not offline
+                # if we got the record from XAPI the host is reachable
+                'status': 'online',
                 'id': _sanitize_str(rec.get('uuid', '')),
                 'cpu': cpu_util,
                 'maxcpu': cpu_count,
@@ -360,7 +425,12 @@ class XcpngManager:
                 'netin': acc['in'],
                 'netout': acc['out'],
                 'type': 'node',
+                '_enabled': rec.get('enabled', True),
                 '_ref': ref,
+                '_loadavg': loadavg,
+                '_cpucount': cpu_count,
+                '_product_version': f"{product_brand} {product_ver}" if product_ver else '',
+                '_xen_version': xen_ver,
             })
         return nodes
 
@@ -627,20 +697,24 @@ class XcpngManager:
             cpu_frac = n.get('cpu', 0) or 0  # guard against NaN/None
             mem_pct = round(mem_used / maxmem * 100, 1) if maxmem else 0
             cpu_pct = round(cpu_frac * 100, 1) if cpu_frac == cpu_frac else 0
+            cpucount = n.get('_cpucount', n.get('maxcpu', 0))
             result[name] = {
                 'status': n.get('status', 'unknown'),
                 'cpu_percent': cpu_pct,
                 'mem_used': mem_used,
                 'mem_total': maxmem,
                 'mem_percent': mem_pct,
-                'disk_used': 0,   # XAPI doesn't expose dom0 rootfs usage
-                'disk_total': 0,
-                'disk_percent': 0,
+                'disk_used': None,   # XAPI doesn't expose dom0 rootfs
+                'disk_total': None,
+                'disk_percent': None,
                 'netin': n.get('netin', 0),
                 'netout': n.get('netout', 0),
                 'uptime': n.get('uptime', 0),
                 'score': cpu_pct + mem_pct,
-                'maintenance_mode': name in self.nodes_in_maintenance,
+                'loadavg': n.get('_loadavg'),
+                'cpuinfo': {'cores': cpucount, 'sockets': 1} if cpucount else None,
+                'pveversion': n.get('_product_version', ''),
+                'maintenance_mode': name in self.nodes_in_maintenance or not n.get('_enabled', True),
                 'offline': n.get('status') != 'online',
             }
         return result
@@ -667,7 +741,7 @@ class XcpngManager:
             raise ConnectionError("Not connected to XCP-ng")
         return api.VM.get_by_uuid(vm_uuid)
 
-    def start_vm(self, node, vmid) -> str:
+    def start_vm(self, node, vmid, vm_type='qemu') -> str:
         api = self._api()
         if not api:
             return None
@@ -682,7 +756,7 @@ class XcpngManager:
             self.logger.error(f"start_vm {vmid}: {e}")
             return None
 
-    def stop_vm(self, node, vmid) -> str:
+    def stop_vm(self, node, vmid, vm_type='qemu') -> str:
         """Hard shutdown."""
         api = self._api()
         if not api:
@@ -695,7 +769,7 @@ class XcpngManager:
             self.logger.error(f"stop_vm {vmid}: {e}")
             return None
 
-    def shutdown_vm(self, node, vmid) -> str:
+    def shutdown_vm(self, node, vmid, vm_type='qemu') -> str:
         """Clean shutdown (ACPI)."""
         api = self._api()
         if not api:
@@ -720,7 +794,7 @@ class XcpngManager:
             self.logger.error(f"reboot_vm {vmid}: {e}")
             return None
 
-    def suspend_vm(self, node, vmid) -> str:
+    def suspend_vm(self, node, vmid, vm_type='qemu') -> str:
         api = self._api()
         if not api:
             return None
@@ -732,7 +806,7 @@ class XcpngManager:
             self.logger.error(f"suspend_vm {vmid}: {e}")
             return None
 
-    def resume_vm(self, node, vmid) -> str:
+    def resume_vm(self, node, vmid, vm_type='qemu') -> str:
         api = self._api()
         if not api:
             return None
@@ -895,11 +969,15 @@ class XcpngManager:
         return [{k: v for k, v in t.items() if not k.startswith('_')} for t in tpls]
 
     def create_vm(self, node, vm_config) -> dict:
-        """Create VM from template on XCP-ng.
+        """Create VM on XCP-ng - from template, ISO, or PXE.
 
         vm_config keys:
-          template   - UUID or name of the source template (required)
+          install_method - 'template' (default), 'iso', or 'pxe'
+          template   - UUID or name of source template (required for template method)
           name       - VM name (required)
+          os_type    - OS type key for built-in template selection (iso/pxe)
+          iso_uuid   - VDI UUID of ISO to boot from (iso method)
+          disk_size  - disk size in GB (iso/pxe method)
           vcpus      - number of vCPUs
           memory     - RAM in bytes (or int with 'G' suffix stripped)
           sr         - target SR UUID for disk provisioning
@@ -907,6 +985,10 @@ class XcpngManager:
           start      - bool, start VM after creation
           description - optional description
         """
+        install_method = vm_config.get('install_method', 'template')
+        if install_method in ('iso', 'pxe'):
+            return self._create_vm_from_scratch(node, vm_config)
+
         api = self._api()
         if not api:
             return {'success': False, 'error': 'Not connected to XCP-ng'}
@@ -1002,6 +1084,212 @@ class XcpngManager:
         except Exception as e:
             self.logger.error(f"create_vm failed: {e}")
             return {'success': False, 'error': str(e)}
+
+    def _create_vm_from_scratch(self, node, vm_config):
+        """Create VM from built-in template + ISO boot or PXE.
+
+        MK Mar 2026 - cloning built-in templates is more reliable than VM.create()
+        because XAPI sets platform flags (ACPI, PAE, viridian for Windows) automatically.
+        """
+        api = self._api()
+        if not api:
+            return {'success': False, 'error': 'Not connected to XCP-ng'}
+
+        vm_name = _sanitize_str(vm_config.get('name', ''))
+        if not vm_name:
+            return {'success': False, 'error': 'VM name is required'}
+
+        method = vm_config.get('install_method', 'iso')
+        os_type = vm_config.get('os_type', 'linux')
+        tpl_name = self._OS_TEMPLATE_MAP.get(os_type, 'Other install media')
+
+        try:
+            # find built-in template by name_label
+            builtin_ref = None
+            for ref in api.VM.get_all():
+                try:
+                    rec = api.VM.get_record(ref)
+                    if not rec.get('is_a_template'):
+                        continue
+                    # built-in templates have empty other_config['default_template'] or are
+                    # simply the ones that ship with XCP-ng - match by name
+                    if rec.get('name_label') == tpl_name:
+                        builtin_ref = ref
+                        break
+                except Exception:
+                    continue
+
+            if not builtin_ref:
+                # fallback: try 'Other install media' if specific template missing
+                if tpl_name != 'Other install media':
+                    self.logger.warning(f"Template '{tpl_name}' not found, falling back to 'Other install media'")
+                    for ref in api.VM.get_all():
+                        try:
+                            rec = api.VM.get_record(ref)
+                            if rec.get('is_a_template') and rec.get('name_label') == 'Other install media':
+                                builtin_ref = ref
+                                break
+                        except Exception:
+                            continue
+                if not builtin_ref:
+                    return {'success': False, 'error': f'Built-in template not found: {tpl_name}'}
+
+            # clone + unmark as template
+            new_ref = api.VM.clone(builtin_ref, vm_name)
+            api.VM.set_is_a_template(new_ref, False)
+
+            # clean up template disk specs
+            try:
+                api.VM.remove_from_other_config(new_ref, 'disks')
+            except Exception:
+                pass  # might not exist
+
+            # remove template VBDs+VDIs (we create our own disk)
+            for vbd_ref in api.VM.get_VBDs(new_ref):
+                try:
+                    vbd_rec = api.VBD.get_record(vbd_ref)
+                    vdi = vbd_rec.get('VDI', 'OpaqueRef:NULL')
+                    api.VBD.destroy(vbd_ref)
+                    if vdi != 'OpaqueRef:NULL':
+                        api.VDI.destroy(vdi)
+                except Exception:
+                    pass
+
+            # description
+            desc = vm_config.get('description', '')
+            if desc:
+                api.VM.set_name_description(new_ref, _sanitize_str(desc))
+
+            # vCPUs
+            vcpus = vm_config.get('vcpus')
+            if vcpus:
+                vc = max(1, min(int(vcpus), 256))
+                api.VM.set_VCPUs_max(new_ref, str(vc))
+                api.VM.set_VCPUs_at_startup(new_ref, str(vc))
+
+            # memory
+            memory = vm_config.get('memory')
+            if memory:
+                mem_bytes = int(str(memory).replace('G', '').replace('g', ''))
+                if mem_bytes < 4096:
+                    mem_bytes *= 1024 * 1024 * 1024
+                mem_bytes = max(mem_bytes, 128 * 1024 * 1024)
+                s = str(mem_bytes)
+                api.VM.set_memory_limits(new_ref, s, s, s, s)
+
+            # find target SR for the new disk
+            target_sr_uuid = vm_config.get('sr')
+            target_sr = None
+            if target_sr_uuid:
+                target_sr = api.SR.get_by_uuid(target_sr_uuid)
+            else:
+                # use pool default SR
+                pool_refs = api.pool.get_all()
+                if pool_refs:
+                    default_sr = api.pool.get_default_SR(pool_refs[0])
+                    if default_sr and default_sr != 'OpaqueRef:NULL':
+                        target_sr = default_sr
+
+            if not target_sr:
+                # last resort: pick first non-ISO SR
+                for sr_ref in api.SR.get_all():
+                    sr_type = api.SR.get_type(sr_ref)
+                    if sr_type not in ('iso', 'udev', 'cd'):
+                        target_sr = sr_ref
+                        break
+
+            # create new VDI on target SR
+            disk_gb = int(vm_config.get('disk_size', 32))
+            disk_bytes = disk_gb * 1024 * 1024 * 1024
+            vdi_rec = {
+                'name_label': f'{vm_name} disk 0',
+                'name_description': 'Created by PegaProx',
+                'SR': target_sr,
+                'virtual_size': str(disk_bytes),
+                'type': 'user',
+                'sharable': False,
+                'read_only': False,
+                'other_config': {},
+            }
+            new_vdi = api.VDI.create(vdi_rec)
+
+            # attach disk as VBD
+            vbd_rec = {
+                'VM': new_ref,
+                'VDI': new_vdi,
+                'userdevice': '0',
+                'bootable': True,
+                'mode': 'RW',
+                'type': 'Disk',
+                'empty': False,
+                'other_config': {},
+                'qos_algorithm_type': '',
+                'qos_algorithm_params': {},
+            }
+            api.VBD.create(vbd_rec)
+
+            if method == 'iso':
+                iso_uuid = vm_config.get('iso_uuid', '')
+                if iso_uuid:
+                    iso_vdi = api.VDI.get_by_uuid(iso_uuid)
+                    cd_rec = {
+                        'VM': new_ref,
+                        'VDI': iso_vdi,
+                        'userdevice': '3',
+                        'bootable': False,
+                        'mode': 'RO',
+                        'type': 'CD',
+                        'empty': False,
+                        'other_config': {},
+                        'qos_algorithm_type': '',
+                        'qos_algorithm_params': {},
+                    }
+                    api.VBD.create(cd_rec)
+                # boot order: cdrom first, then disk
+                boot_order = vm_config.get('boot_order', 'dc')
+                api.VM.set_HVM_boot_params(new_ref, {'order': boot_order})
+            elif method == 'pxe':
+                # network boot
+                api.VM.set_HVM_boot_params(new_ref, {'order': 'n'})
+
+            api.VM.set_HVM_boot_policy(new_ref, 'BIOS order')
+
+            # network
+            net_ident = vm_config.get('network')
+            if net_ident:
+                self._attach_network(api, new_ref, net_ident)
+
+            new_uuid = api.VM.get_uuid(new_ref)
+            db = get_db()
+            new_vmid = db.xcpng_get_vmid(self.id, new_uuid)
+
+            self.logger.info(f"Created VM {new_vmid} ({vm_name}) via {method}, os_type={os_type}")
+
+            if vm_config.get('start'):
+                try:
+                    api.Async.VM.start(new_ref, False, False)
+                except Exception as e:
+                    self.logger.warning(f"auto-start failed for new VM: {e}")
+
+            self._cached_vms = None
+            return {'success': True, 'vmid': new_vmid, 'uuid': new_uuid}
+        except Exception as e:
+            self.logger.error(f"_create_vm_from_scratch failed: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def get_os_types(self):
+        """Available OS types for the 'from scratch' VM creation wizard."""
+        return [
+            {'key': 'linux', 'label': 'Linux (Generic)'},
+            {'key': 'ubuntu', 'label': 'Ubuntu'},
+            {'key': 'debian', 'label': 'Debian'},
+            {'key': 'centos', 'label': 'CentOS / Rocky'},
+            {'key': 'rhel', 'label': 'Red Hat Enterprise Linux'},
+            {'key': 'sles', 'label': 'SUSE Linux Enterprise'},
+            {'key': 'windows', 'label': 'Windows 10 / Server'},
+            {'key': 'windows11', 'label': 'Windows 11'},
+            {'key': 'other', 'label': 'Other'},
+        ]
 
     def _move_vm_disks_to_sr(self, api, vm_ref, target_sr_uuid):
         """Move all VDIs of a VM to a different SR. Used during template-based creation."""
@@ -1476,7 +1764,7 @@ class XcpngManager:
                 'type': 'xcpng_vnc',
                 'url': location,
                 'session_ref': session_ref,
-                'host': self.current_host or self.config.host,
+                'host': self.host,
                 'port': 443,
             }
         except ValueError as e:
@@ -1657,36 +1945,93 @@ class XcpngManager:
             return {'success': False, 'error': str(e)}
 
     def move_disk(self, node, vmid, vm_type, disk_id, target_storage, delete_original=True):
-        """Move VDI to a different SR. Uses VDI.copy + optional destroy."""
+        """Move VDI to a different SR - full implementation with VBD swap.
+
+        NS Mar 2026 - rewritten to properly swap VBDs and clean up.
+        VM must be stopped (XAPI doesn't support hot-move of individual disks).
+        """
         api = self._api()
         if not api:
             return {'success': False, 'error': 'Not connected'}
         try:
             ref = self._resolve_vm(vmid)
+
+            # check power state - must be halted
+            power = api.VM.get_power_state(ref)
+            if power != 'Halted':
+                return {'success': False,
+                        'error': 'VM must be stopped for disk move. For live migration of all disks, use VM Migrate.'}
+
             vbds = api.VM.get_VBDs(ref)
             src_vdi = None
             src_vbd = None
+            vbd_props = {}
             for vbd_ref in vbds:
                 rec = api.VBD.get_record(vbd_ref)
                 if rec.get('type') != 'Disk':
                     continue
                 dev = str(rec.get('userdevice', ''))
-                if dev == str(disk_id):
+                vdi_uuid = ''
+                if rec.get('VDI') and rec['VDI'] != 'OpaqueRef:NULL':
+                    vdi_uuid = api.VDI.get_uuid(rec['VDI'])
+                if dev == str(disk_id) or vdi_uuid == str(disk_id):
                     src_vbd = vbd_ref
                     src_vdi = rec['VDI']
+                    # save VBD properties for recreation
+                    vbd_props = {
+                        'userdevice': rec.get('userdevice', '0'),
+                        'bootable': rec.get('bootable', False),
+                        'mode': rec.get('mode', 'RW'),
+                        'type': rec.get('type', 'Disk'),
+                        'other_config': rec.get('other_config', {}),
+                    }
                     break
+
             if not src_vdi:
                 return {'success': False, 'error': f'Disk {disk_id} not found'}
 
             target_sr = api.SR.get_by_uuid(target_storage)
 
-            # async copy
-            task_ref = api.Async.VDI.copy(src_vdi, target_sr)
-            tid = self._track_task(task_ref, 'move_disk', vmid)
-            # note: caller would need to swap VBD after completion for a full move
-            # this is a best-effort approach
-            return {'success': True, 'message': 'Disk copy started', 'task': tid}
+            # same-SR check
+            current_sr = api.VDI.get_SR(src_vdi)
+            if current_sr == target_sr:
+                return {'success': False, 'error': 'Disk is already on the target storage'}
+
+            # copy VDI to new SR (synchronous - VM is off anyway)
+            old_label = api.VDI.get_name_label(src_vdi)
+            new_vdi = api.VDI.copy(src_vdi, target_sr)
+            api.VDI.set_name_label(new_vdi, old_label)
+
+            # destroy old VBD
+            api.VBD.destroy(src_vbd)
+
+            # create new VBD pointing to the new VDI
+            new_vbd_rec = {
+                'VM': ref,
+                'VDI': new_vdi,
+                'userdevice': vbd_props.get('userdevice', '0'),
+                'bootable': vbd_props.get('bootable', False),
+                'mode': vbd_props.get('mode', 'RW'),
+                'type': vbd_props.get('type', 'Disk'),
+                'empty': False,
+                'other_config': vbd_props.get('other_config', {}),
+                'qos_algorithm_type': '',
+                'qos_algorithm_params': {},
+            }
+            api.VBD.create(new_vbd_rec)
+
+            # delete original VDI
+            if delete_original:
+                try:
+                    api.VDI.destroy(src_vdi)
+                except Exception as de:
+                    self.logger.warning(f"move_disk: VBD swapped but old VDI cleanup failed: {de}")
+
+            self._cached_vms = None
+            self.logger.info(f"Moved disk {disk_id} of VM {vmid} to SR {target_storage}")
+            return {'success': True, 'message': f'Disk {disk_id} moved successfully'}
         except Exception as e:
+            self.logger.error(f"move_disk {vmid}: {e}")
             return {'success': False, 'error': str(e)}
 
     # ──────────────────────────────────────────
@@ -2171,7 +2516,7 @@ class XcpngManager:
             # for ISO SRs, we use HTTP PUT to the host
             import requests as _req
             session_ref = api.xenapi._session
-            host_url = f"https://{self.current_host or self.config.host}"
+            host_url = f"https://{self.host}"
 
             if sr_type == 'iso' or content_type == 'iso':
                 # XAPI ISO import is via VDI create + HTTP upload
@@ -2219,7 +2564,7 @@ class XcpngManager:
         import xml.etree.ElementTree as ET
         import requests as _req
 
-        host_url = f"https://{self.current_host or self.config.host}"
+        host_url = f"https://{self.host}"
         with self._session_lock:
             if not self._session:
                 return None, None
@@ -2704,6 +3049,10 @@ class XcpngManager:
         except Exception:
             pass
         return self.config.host
+
+    def get_node_ip(self, node_name):
+        """Public wrapper - used by API layer for shell connections."""
+        return self._get_host_ip(node_name)
 
     def _ssh_connect(self, host, retries=3):
         """Open SSH connection to XCP-ng host."""
@@ -3550,6 +3899,267 @@ echo DONE""",
         return results
 
     # ──────────────────────────────────────────
+    # Node disks & storage repos - NS/LW Mar 2026
+    # ──────────────────────────────────────────
+
+    def get_node_disks(self, node):
+        """List physical disks on a node via lsblk. Returns same-ish shape as Proxmox."""
+        # LW: validate node name against injection
+        if not re.match(r'^[a-zA-Z0-9\-_.]+$', node):
+            return []
+        rc, out, _ = self._ssh_exec(node,
+            "lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN,FSTYPE 2>/dev/null")
+        if rc != 0 or not out.strip():
+            return []
+        try:
+            import json as _json
+            data = _json.loads(out)
+        except Exception:
+            return []
+
+        disks = []
+        for dev in data.get('blockdevices', []):
+            if dev.get('type') not in ('disk',):
+                continue
+            name = dev.get('name', '')
+            size = int(dev.get('size', 0) or 0)
+            transport = dev.get('tran', '') or ''
+            rotational = dev.get('rota', True)
+
+            # figure out disk type
+            if 'nvme' in name or transport == 'nvme':
+                disk_type = 'nvme'
+            elif not rotational or transport == 'sata' and size < 4 * 1024**4:
+                disk_type = 'ssd'
+            else:
+                disk_type = 'hdd'
+
+            # check if disk is in use
+            in_use = False
+            children = dev.get('children', [])
+            if children:
+                in_use = True
+            # also check mountpoint and fstype on the disk itself
+            if dev.get('mountpoint') or dev.get('fstype'):
+                in_use = True
+
+            disks.append({
+                'devpath': f'/dev/{name}',
+                'name': name,
+                'size': size,
+                'model': (dev.get('model') or '').strip(),
+                'serial': (dev.get('serial') or '').strip(),
+                'type': disk_type,
+                'transport': transport,
+                'used': in_use,
+                'mounted': dev.get('mountpoint', ''),
+                'fstype': dev.get('fstype', ''),
+                'partitions': len(children),
+            })
+        return disks
+
+    def get_node_disk_smart(self, node, disk):
+        """SMART data for a specific disk."""
+        # validate disk path to prevent injection
+        if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
+            return {'error': f'Invalid disk name: {disk}'}
+        rc, out, err = self._ssh_exec(node, f"smartctl -a /dev/{disk} --json 2>/dev/null", timeout=30)
+        if rc == -1:
+            return {'error': 'SSH connection failed'}
+        try:
+            import json as _json
+            return _json.loads(out)
+        except Exception:
+            # smartctl sometimes returns non-zero but valid output
+            return {'raw': out[:2000], 'error': err[:500] if err else None}
+
+    def init_disk_gpt(self, node, disk, uuid=None):
+        """Initialize disk with GPT partition table. DESTRUCTIVE."""
+        if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
+            return {'success': False, 'error': f'Invalid disk: {disk}'}
+        # NS: sgdisk -Z wipes existing, -o creates fresh GPT
+        rc, out, err = self._ssh_exec(node,
+            f"sgdisk -Z /dev/{disk} && sgdisk -o /dev/{disk}", timeout=30)
+        if rc == 0:
+            return {'success': True, 'message': f'GPT initialized on /dev/{disk}'}
+        return {'success': False, 'error': err or 'sgdisk failed'}
+
+    def wipe_disk(self, node, disk):
+        if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
+            return {'success': False, 'error': f'Invalid disk: {disk}'}
+        rc, _, err = self._ssh_exec(node, f"wipefs -a /dev/{disk}", timeout=30)
+        if rc == 0:
+            return {'success': True, 'message': f'/dev/{disk} wiped'}
+        return {'success': False, 'error': err or 'wipefs failed'}
+
+    def _resolve_host(self, node_name):
+        """Resolve node name to XAPI host ref. Used by SR creation etc."""
+        api = self._api()
+        if not api:
+            return None, None
+        for href in api.host.get_all():
+            try:
+                hn = api.host.get_hostname(href)
+                if hn == node_name or api.host.get_name_label(href) == node_name:
+                    return api, href
+            except Exception:
+                continue
+        return api, None
+
+    def create_sr_nfs(self, node, name, server, path, nfsversion='3'):
+        """Create shared NFS storage repository."""
+        api, host_ref = self._resolve_host(node)
+        if not host_ref:
+            return {'success': False, 'error': f'Host {node} not found'}
+        try:
+            device_config = {
+                'server': server,
+                'serverpath': path,
+            }
+            if nfsversion and nfsversion != '3':
+                device_config['nfsversion'] = str(nfsversion)
+
+            sr_ref = api.SR.create(
+                host_ref, device_config, '0',  # physical_size=0 means auto-detect
+                name, '', 'nfs', '',  # content_type
+                True,  # shared
+                {}     # sm_config
+            )
+            sr_uuid = api.SR.get_uuid(sr_ref)
+            self.logger.info(f"Created NFS SR '{name}' on {node}: {server}:{path}")
+            self._cached_nodes = None
+            return {'success': True, 'uuid': sr_uuid}
+        except Exception as e:
+            self.logger.error(f"create_sr_nfs: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def create_sr_iscsi(self, node, name, target, iqn, scsi_id, port=3260,
+                        chap_user='', chap_pass=''):
+        """Create shared iSCSI SR (LVM over iSCSI)."""
+        api, host_ref = self._resolve_host(node)
+        if not host_ref:
+            return {'success': False, 'error': f'Host {node} not found'}
+        try:
+            device_config = {
+                'target': target,
+                'targetIQN': iqn,
+                'SCSIid': scsi_id,
+                'port': str(port),
+            }
+            if chap_user:
+                device_config['chapuser'] = chap_user
+                device_config['chappassword'] = chap_pass
+
+            sr_ref = api.SR.create(
+                host_ref, device_config, '0',
+                name, '', 'lvmoiscsi', '',
+                True, {}
+            )
+            uuid = api.SR.get_uuid(sr_ref)
+            self.logger.info(f"Created iSCSI SR '{name}' -> {target}")
+            self._cached_nodes = None
+            return {'success': True, 'uuid': uuid}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def create_sr_lvm(self, node, name, device):
+        """Create local LVM SR on a specific disk."""
+        # MK: validate device path
+        if not re.match(r'^/dev/[a-zA-Z0-9/]+$', device):
+            return {'success': False, 'error': f'Invalid device path: {device}'}
+        api, host_ref = self._resolve_host(node)
+        if not host_ref:
+            return {'success': False, 'error': f'Host {node} not found'}
+        try:
+            sr_ref = api.SR.create(
+                host_ref, {'device': device}, '0',
+                name, '', 'lvm', '',
+                False, {}  # local, not shared
+            )
+            uuid = api.SR.get_uuid(sr_ref)
+            self.logger.info(f"Created LVM SR '{name}' on {device}")
+            self._cached_nodes = None
+            return {'success': True, 'uuid': uuid}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def create_sr_ext(self, node, name, device):
+        """Local EXT SR - simpler than LVM, good for single-disk setups."""
+        if not re.match(r'^/dev/[a-zA-Z0-9/]+$', device):
+            return {'success': False, 'error': f'Invalid device: {device}'}
+        api, host_ref = self._resolve_host(node)
+        if not host_ref:
+            return {'success': False, 'error': f'Host {node} not found'}
+        try:
+            sr_ref = api.SR.create(
+                host_ref, {'device': device}, '0',
+                name, '', 'ext', '',
+                False, {}
+            )
+            self._cached_nodes = None
+            return {'success': True, 'uuid': api.SR.get_uuid(sr_ref)}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def discover_iscsi(self, node, target, port=3260):
+        """Probe iSCSI target for available IQNs and LUNs."""
+        api, host_ref = self._resolve_host(node)
+        if not host_ref:
+            return {'success': False, 'error': f'Host {node} not found'}
+        try:
+            # phase 1: discover IQNs
+            probe_result = api.SR.probe(
+                host_ref,
+                {'target': target, 'port': str(port)},
+                'lvmoiscsi', {}
+            )
+            # probe returns XML - parse IQNs
+            iqns = []
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.fromstring(probe_result)
+                for tgt in root.findall('.//TGT'):
+                    iqn_el = tgt.find('TargetIQN')
+                    ip_el = tgt.find('IPAddress')
+                    if iqn_el is not None:
+                        iqns.append({
+                            'iqn': iqn_el.text,
+                            'ip': ip_el.text if ip_el is not None else target,
+                        })
+            except ET.ParseError:
+                pass
+            return {'success': True, 'iqns': iqns}
+        except Exception as e:
+            # XAPI throws an exception with LUN info when IQN is provided
+            err_str = str(e)
+            if 'SCSIid' in err_str:
+                # this means probe succeeded, parse LUNs from the error XML
+                luns = []
+                try:
+                    root = ET.fromstring(err_str)
+                    for lun in root.findall('.//LUN'):
+                        scsi_el = lun.find('SCSIid')
+                        size_el = lun.find('size')
+                        if scsi_el is not None:
+                            luns.append({
+                                'scsi_id': scsi_el.text,
+                                'size': int(size_el.text) if size_el is not None else 0,
+                            })
+                except Exception:
+                    pass
+                return {'success': True, 'luns': luns}
+            return {'success': False, 'error': str(e)}
+
+    # compat wrappers for Proxmox-style API dispatch
+    def create_node_lvm(self, node, name, device):
+        return self.create_sr_lvm(node, name, device)
+
+    def get_node_lvm(self, node):
+        """Return SRs that look like LVM storages - for API compat."""
+        storages = self.get_storages(node)
+        return [s for s in storages if s.get('type') in ('lvm', 'lvmoiscsi', 'lvmohba')]
+
+    # ──────────────────────────────────────────
     # Resource pools - DB-backed (XAPI has no equivalent)
     # LW Mar 2026 - lightweight pool feature for XCP-ng
     # ──────────────────────────────────────────
@@ -3740,13 +4350,61 @@ echo DONE""",
         }]
 
     def renew_node_certificate(self, node, force=False):
-        return {'success': False, 'error': 'Certificate renewal not supported for XCP-ng via web UI'}
+        """Generate fresh self-signed cert for XAPI.
+        XCP-ng has no ACME — so 'renew' means regenerate self-signed."""
+        host_ip = self._get_host_ip(node)
+        # backup before touching the pem - if openssl craps out xapi won't start
+        self._ssh_exec(node, "cp /etc/xensource/xapi-ssl.pem /etc/xensource/xapi-ssl.pem.bak 2>/dev/null")
+        # NS: xapi expects combined pem, 10yr validity should be fine
+        gen_cmd = (
+            "openssl req -x509 -nodes -days 3650 -newkey rsa:2048 "
+            "-keyout /etc/xensource/xapi-ssl.pem "
+            "-out /etc/xensource/xapi-ssl.pem "
+            "-subj '/CN=%s' 2>&1" % host_ip
+        )
+        rc, out, err = self._ssh_exec(node, gen_cmd, timeout=30)
+        if rc != 0:
+            self._ssh_exec(node, "mv /etc/xensource/xapi-ssl.pem.bak /etc/xensource/xapi-ssl.pem 2>/dev/null")
+            return {'success': False, 'error': err or out or 'openssl failed'}
+
+        rc2, _, err2 = self._ssh_exec(node, "systemctl restart xapi 2>&1", timeout=45)
+        if rc2 != 0:
+            self.logger.warning(f"cert renewed but xapi restart failed on {node}: {err2}")
+            return {'success': True, 'message': 'Certificate renewed but XAPI restart failed — restart manually'}
+        # cleanup backup on success
+        self._ssh_exec(node, "rm -f /etc/xensource/xapi-ssl.pem.bak 2>/dev/null")
+        return {'success': True, 'message': 'Certificate renewed'}
 
     def upload_node_certificate(self, node, certificates, key, restart=True, force=False):
-        return {'success': False, 'error': 'Custom certificate upload not yet supported for XCP-ng'}
+        """Upload custom cert+key to XCP-ng node via SSH."""
+        if not certificates or not key:
+            return {'success': False, 'error': 'Certificate and key required'}
+        # combine cert + key into single PEM (xapi wants both in one file)
+        combined = certificates.strip() + '\n' + key.strip() + '\n'
+        # backup current cert first
+        self._ssh_exec(node, "cp /etc/xensource/xapi-ssl.pem /etc/xensource/xapi-ssl.pem.bak 2>/dev/null")
+        rc, _, err = self._ssh_exec(node,
+            f"cat > /etc/xensource/xapi-ssl.pem << 'CERT_EOF'\n{combined}CERT_EOF")
+        if rc != 0:
+            return {'success': False, 'error': err or 'Failed to write certificate'}
+
+        # validate the cert is readable
+        rc_v, _, _ = self._ssh_exec(node,
+            "openssl x509 -in /etc/xensource/xapi-ssl.pem -noout -subject 2>&1")
+        if rc_v != 0:
+            # rollback
+            self._ssh_exec(node, "mv /etc/xensource/xapi-ssl.pem.bak /etc/xensource/xapi-ssl.pem 2>/dev/null")
+            return {'success': False, 'error': 'Invalid certificate — rolled back'}
+
+        if restart:
+            rc_r, _, err_r = self._ssh_exec(node, "systemctl restart xapi 2>&1", timeout=45)
+            if rc_r != 0:
+                return {'success': True, 'message': 'Certificate uploaded but XAPI restart failed'}
+        return {'success': True, 'message': 'Certificate uploaded successfully'}
 
     def delete_node_certificate(self, node, restart=True):
-        return {'success': False, 'error': 'Certificate management not supported for XCP-ng via web UI'}
+        """Revert to self-signed certificate (same as renew for XCP-ng)."""
+        return self.renew_node_certificate(node, force=True)
 
     def get_node_subscription(self, node):
         return {}
@@ -3774,9 +4432,6 @@ echo DONE""",
         """Compat stub - PegaProxManager returns a requests.Session. We don't need this."""
         return None
 
-    def get_last_migration_log(self):
-        return []
-
     # NS: get_pools / get_pool_members moved to resource pools section above (DB-backed)
 
     def get_next_vmid(self) -> dict:
@@ -3792,8 +4447,16 @@ echo DONE""",
             return {'success': False, 'error': str(e)}
 
     def get_node_shell_ticket(self, node):
-        """XCP-ng doesn't support browser shell - use SSH directly."""
-        return {'success': False, 'error': 'Shell access not supported for XCP-ng. Use SSH to connect to the host.'}
+        """Return SSH connection info for the web terminal.
+        NS Mar 2026 - the SSH websocket server is hypervisor-agnostic, just give it the IP."""
+        node_ip = self._get_host_ip(node)
+        return {
+            'success': True,
+            'type': 'ssh',
+            'host': node_ip,
+            'port': getattr(self.config, 'ssh_port', 22) or 22,
+            'node': node,
+        }
 
     def get_vm_lock_status(self, node, vmid, vm_type='qemu'):
         """XCP-ng VMs use XAPI locks internally, not user-visible like Proxmox."""
@@ -3862,7 +4525,19 @@ echo DONE""",
         pass  # Proxmox-specific, XCP-ng handles boot order differently
 
     def update_node_options(self, node, options):
-        return {'success': False, 'error': 'Node options not supported on XCP-ng'}
+        """Store node options in XAPI host.other_config."""
+        if not options:
+            return {'success': True, 'message': 'Nothing to update'}
+        api, href = self._resolve_host_ref(node)
+        if not href:
+            return {'success': False, 'error': f'Host {node} not found'}
+        try:
+            for k, v in options.items():
+                api.host.add_to_other_config(href, f'pegaprox:{k}', str(v))
+            return {'success': True, 'message': 'Options updated'}
+        except Exception as e:
+            self.logger.error(f"update_node_options {node}: {e}")
+            return {'success': False, 'error': str(e)}
 
     def get_storage_list(self, node=None):
         """Alias for get_storages - Proxmox API compat."""
@@ -3871,8 +4546,43 @@ echo DONE""",
     def get_network_list(self, node=None):
         return self.get_networks(node)
 
-    def toggle_network_link(self, node, vmid, vm_type, net_id, state):
-        return {'success': False, 'error': 'Not supported on XCP-ng'}
+    def toggle_network_link(self, node, vmid, net_id, link_down):
+        """Plug/unplug a VIF to simulate cable disconnect."""
+        api = self._api()
+        if not api:
+            return {'success': False, 'error': 'Not connected'}
+        try:
+            ref = self._resolve_vm(vmid)
+            vifs = api.VM.get_VIFs(ref)
+
+            target = None
+            for vif_ref in vifs:
+                if api.VIF.get_device(vif_ref) == str(net_id):
+                    target = vif_ref
+                    break
+            if not target:
+                return {'success': False, 'error': f'VIF {net_id} not found'}
+
+            power = api.VM.get_power_state(ref)
+            if power != 'Running':
+                return {'success': False, 'error': 'VM must be running to toggle link'}
+
+            attached = api.VIF.get_currently_attached(target)
+            if link_down and not attached:
+                return {'success': True, 'message': f'Network {net_id} already disconnected'}
+            if not link_down and attached:
+                return {'success': True, 'message': f'Network {net_id} already connected'}
+
+            if link_down:
+                api.VIF.unplug(target)
+            else:
+                api.VIF.plug(target)
+
+            state_str = 'disconnected' if link_down else 'connected'
+            return {'success': True, 'message': f'Network {net_id} {state_str}'}
+        except Exception as e:
+            self.logger.error(f"toggle_network_link {vmid}/{net_id}: {e}")
+            return {'success': False, 'error': str(e)}
 
     def check_snapshot_capability(self, node, vmid, vm_type='qemu'):
         return {'capable': True, 'reason': ''}
@@ -3936,12 +4646,300 @@ echo DONE""",
     def remove_vm_from_proxmox_ha(self, node, vmid, vm_type='qemu'):
         return self.set_vm_ha_restart_priority(vmid, '')
 
-    # balancing
-    def set_vm_balancing_excluded(self, vmid, excluded, vm_type='qemu'):
-        return {'success': False, 'error': 'VM balancing exclusion not implemented for XCP-ng'}
+    # ──────────────────────────────────────────
+    # Load balancing - MK/NS Mar 2026
+    # Port from manager.py with XCP-ng specifics (shared storage check etc)
+    # ──────────────────────────────────────────
 
-    def find_migration_candidate(self, *args, **kwargs):
-        return None
+    def set_vm_balancing_excluded(self, vmid, excluded, vm_type='qemu'):
+        db = get_db()
+        try:
+            cursor = db.conn.cursor()
+            if excluded:
+                cursor.execute(
+                    'INSERT OR IGNORE INTO balancing_excluded_vms (cluster_id, vmid) VALUES (?, ?)',
+                    (self.id, int(vmid)))
+            else:
+                cursor.execute(
+                    'DELETE FROM balancing_excluded_vms WHERE cluster_id = ? AND vmid = ?',
+                    (self.id, int(vmid)))
+            db.conn.commit()
+            return {'success': True}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def is_vm_balancing_excluded(self, vmid):
+        db = get_db()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute('SELECT 1 FROM balancing_excluded_vms WHERE cluster_id = ? AND vmid = ?',
+                           (self.id, int(vmid)))
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
+
+    def get_balancing_excluded_vms(self):
+        db = get_db()
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute('SELECT vmid FROM balancing_excluded_vms WHERE cluster_id = ?', (self.id,))
+            return [r[0] for r in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def check_balance_needed(self, node_status=None):
+        """Check if cluster is imbalanced. Returns (needs_balance, max_node, min_node)."""
+        if not node_status:
+            node_status = self.get_node_status()
+        if len(node_status) < 2:
+            return False, None, None
+
+        threshold = getattr(self.config, 'migration_threshold', 30)
+
+        # filter: online, not in maintenance, not excluded
+        active = {}
+        for name, info in node_status.items():
+            if info.get('offline') or info.get('maintenance_mode'):
+                continue
+            active[name] = info
+
+        if len(active) < 2:
+            return False, None, None
+
+        scores = {n: info.get('score', 0) for n, info in active.items()}
+        max_node = max(scores, key=scores.get)
+        min_node = min(scores, key=scores.get)
+        diff = scores[max_node] - scores[min_node]
+
+        if diff > threshold:
+            return True, max_node, min_node
+        return False, None, None
+
+    def check_vm_storage_type(self, node, vmid):
+        """Check if VM's storage is shared (required for live migration).
+        Returns 'shared', 'local', or 'mixed'."""
+        api = self._api()
+        if not api:
+            return 'local'
+        try:
+            ref = self._resolve_vm(vmid)
+            shared_count = 0
+            local_count = 0
+            for vbd_ref in api.VM.get_VBDs(ref):
+                rec = api.VBD.get_record(vbd_ref)
+                if rec.get('type') != 'Disk':
+                    continue
+                vdi = rec.get('VDI', 'OpaqueRef:NULL')
+                if vdi == 'OpaqueRef:NULL':
+                    continue
+                sr = api.VDI.get_SR(vdi)
+                if api.SR.get_shared(sr):
+                    shared_count += 1
+                else:
+                    local_count += 1
+            if local_count == 0 and shared_count > 0:
+                return 'shared'
+            if shared_count == 0:
+                return 'local'
+            return 'mixed'
+        except Exception:
+            return 'local'
+
+    def find_migration_candidate(self, source_node, target_node=None, exclude_vmids=None):
+        """Find best VM to migrate from source_node.
+        Prefers VMs on shared storage (live-migratable), then smallest memory."""
+        if not exclude_vmids:
+            exclude_vmids = set()
+        excluded_vms = set(self.get_balancing_excluded_vms()) | set(exclude_vmids)
+
+        vms = self._cached_vms or self.get_vms() or []
+        candidates = []
+        for vm in vms:
+            if vm.get('status') != 'running':
+                continue
+            if vm.get('node') != source_node:
+                continue
+            vid = vm.get('vmid')
+            if vid in excluded_vms:
+                continue
+            # check storage
+            st_type = self.check_vm_storage_type(source_node, vid)
+            candidates.append({
+                'vmid': vid,
+                'name': vm.get('name', ''),
+                'mem': vm.get('mem', 0),
+                'storage_type': st_type,
+                'node': source_node,
+            })
+
+        if not candidates:
+            return None
+
+        # sort: shared storage first, then smallest memory
+        candidates.sort(key=lambda c: (0 if c['storage_type'] == 'shared' else 1, c['mem']))
+        return candidates[0]
+
+    def get_best_target_node(self, exclude_nodes=None):
+        """Pick the least loaded node."""
+        node_status = self.get_node_status()
+        if not exclude_nodes:
+            exclude_nodes = set()
+        best = None
+        best_score = float('inf')
+        for name, info in node_status.items():
+            if name in exclude_nodes:
+                continue
+            if info.get('offline') or info.get('maintenance_mode'):
+                continue
+            s = info.get('score', 999)
+            if s < best_score:
+                best_score = s
+                best = name
+        return best
+
+    def _do_balance_migrate(self, vm_info, target_node):
+        """Execute a single balancing migration. Returns True on success."""
+        vmid = vm_info['vmid']
+        source = vm_info['node']
+        try:
+            self.logger.info(f"[BALANCE] migrating VM {vmid} ({vm_info.get('name','')}) "
+                             f"{source} -> {target_node}")
+            result = self.migrate_vm_manual(source, vmid, 'qemu', target_node=target_node, online=True)
+            if result.get('success'):
+                self.last_migration_log.append({
+                    'ts': time.time(),
+                    'vmid': vmid,
+                    'from': source,
+                    'to': target_node,
+                    'reason': 'auto_balance',
+                })
+                # keep log short
+                if len(self.last_migration_log) > 50:
+                    self.last_migration_log = self.last_migration_log[-50:]
+                return True
+            else:
+                self.logger.warning(f"[BALANCE] migration failed: {result.get('error')}")
+        except Exception as e:
+            self.logger.error(f"[BALANCE] migrate VM {vmid}: {e}")
+        return False
+
+    def run_balance_check(self):
+        """Main balancing cycle - called from _run_loop."""
+        node_status = self.get_node_status()
+        if not node_status:
+            return
+
+        needs, max_node, min_node = self.check_balance_needed(node_status)
+        if not needs:
+            return
+
+        self.logger.info(f"[BALANCE] imbalance detected: {max_node} (overloaded) vs {min_node}")
+
+        # max migrations per cycle depends on cluster size
+        num_nodes = len([n for n in node_status.values() if not n.get('offline')])
+        max_migrations = min(3, max(1, num_nodes // 2))
+        migrated = 0
+        already_tried = set()
+
+        for _ in range(max_migrations):
+            candidate = self.find_migration_candidate(max_node, min_node, already_tried)
+            if not candidate:
+                break
+
+            already_tried.add(candidate['vmid'])
+
+            # only live-migrate shared storage VMs
+            if candidate['storage_type'] != 'shared':
+                self.logger.info(f"[BALANCE] skipping VM {candidate['vmid']} - local storage")
+                continue
+
+            target = min_node or self.get_best_target_node(exclude_nodes={max_node})
+            if not target:
+                break
+
+            ok = self._do_balance_migrate(candidate, target)
+            if ok:
+                migrated += 1
+                time.sleep(5)  # brief pause between migrations
+                # re-check balance after each migration
+                needs, max_node, min_node = self.check_balance_needed()
+                if not needs:
+                    break
+
+        if migrated:
+            self.logger.info(f"[BALANCE] cycle done, {migrated} VM(s) migrated")
+
+    # ──────────────────────────────────────────
+    # Predictive analysis - MK Mar 2026
+    # ──────────────────────────────────────────
+
+    def _compute_predictive_score(self, node_name, window=24):
+        """Weighted moving average over recent metrics. Returns forecast dict.
+
+        window: hours of history to consider (capped by available data).
+        """
+        hist = self._node_metrics_history.get(node_name, [])
+        if not hist:
+            return None
+
+        now = time.time()
+        cutoff = now - (window * 3600)
+        recent = [s for s in hist if s['ts'] >= cutoff]
+        if len(recent) < 3:
+            recent = hist[-10:]  # not enough data, use what we have
+
+        n = len(recent)
+        # exponential weights - newer samples weigh more
+        total_w = 0
+        cpu_weighted = 0
+        mem_weighted = 0
+        for i, s in enumerate(recent):
+            w = (i + 1) ** 1.5  # slightly super-linear weight
+            cpu_weighted += s['cpu'] * w
+            mem_weighted += s['mem'] * w
+            total_w += w
+
+        avg_cpu = cpu_weighted / total_w if total_w else 0
+        avg_mem = mem_weighted / total_w if total_w else 0
+
+        # trend = difference between first and last third averages
+        third = max(1, n // 3)
+        early_cpu = sum(s['cpu'] for s in recent[:third]) / third
+        late_cpu = sum(s['cpu'] for s in recent[-third:]) / third
+        early_mem = sum(s['mem'] for s in recent[:third]) / third
+        late_mem = sum(s['mem'] for s in recent[-third:]) / third
+
+        cpu_trend = late_cpu - early_cpu
+        mem_trend = late_mem - early_mem
+
+        # confidence based on data density
+        expected_samples = window * 3600 / 15  # one sample per 15s
+        confidence = min(1.0, n / max(expected_samples * 0.3, 1))
+
+        return {
+            'score': round(avg_cpu + avg_mem, 1),
+            'trend': 'rising' if (cpu_trend + mem_trend) > 5 else ('falling' if (cpu_trend + mem_trend) < -5 else 'stable'),
+            'confidence': round(confidence, 2),
+            'cpu_forecast': round(avg_cpu + cpu_trend * 0.5, 1),
+            'mem_forecast': round(avg_mem + mem_trend * 0.5, 1),
+            'cpu_trend': round(cpu_trend, 1),
+            'mem_trend': round(mem_trend, 1),
+            'samples': n,
+        }
+
+    def get_predictive_analysis(self):
+        """Predictive analysis for all nodes. Called via api/reports.py dispatch."""
+        nodes = self._cached_nodes or self.get_nodes() or []
+        results = {}
+        for n in nodes:
+            name = n.get('node', '')
+            pred = self._compute_predictive_score(name)
+            if pred:
+                results[name] = pred
+        return results
+
+    def get_last_migration_log(self):
+        return self.last_migration_log
 
     # scheduler compat
     def restart_vm(self, node, vmid, vm_type='qemu'):
@@ -3989,6 +4987,18 @@ echo DONE""",
             return {}
         return {n['node']: n for n in cached}
 
+    @staticmethod
+    def _bracket_ipv6(h):
+        if h and ':' in h and not h.startswith('['):
+            return f'[{h}]'
+        return h
+
     @property
     def host(self):
+        """Host for URL construction - brackets IPv6 (#145)"""
+        h = self.current_host or self.config.host
+        return self._bracket_ipv6(h)
+
+    @property
+    def raw_host(self):
         return self.current_host or self.config.host

@@ -53,7 +53,7 @@
                 { code: 'de', flag: '🇦🇹', label: 'DE', title: 'Deutsch' },
                 { code: 'en', flag: '🇬🇧', label: 'EN', title: 'English' },
                 { code: 'fr', flag: '🇫🇷', label: 'FR', title: 'Français — Coming Soon', soon: true },
-                { code: 'es', flag: '🇪🇸', label: 'ES', title: 'Español — Coming Soon', soon: true },
+                { code: 'es', flag: '🇪🇸', label: 'ES', title: 'Español (LATAM)' },
                 { code: 'pt', flag: '🇧🇷', label: 'PT', title: 'Português' },
             ];
 
@@ -97,6 +97,7 @@
             const [ldapEnabled, setLdapEnabled] = useState(false);  // MK: Feb 2026 - LDAP available
             const [oidcEnabled, setOidcEnabled] = useState(false);  // NS: Feb 2026 - OIDC available
             const [oidcButtonText, setOidcButtonText] = useState('Sign in with Microsoft');
+            const [loginBackground, setLoginBackground] = useState('');
             
             // Check session on mount
             useEffect(() => {
@@ -154,6 +155,7 @@
                             const errData = await r.json();
                             if (errData.ldap_enabled !== undefined) setLdapEnabled(errData.ldap_enabled);
                             if (errData.oidc_enabled !== undefined) { setOidcEnabled(errData.oidc_enabled); setOidcButtonText(errData.oidc_button_text || 'Sign in with Microsoft'); }
+                            if (errData.login_background) setLoginBackground(errData.login_background);
                         } catch(e) {}
                         logout();
                     }
@@ -254,7 +256,8 @@
                                 theme: data.theme,
                                 language: data.language,
                                 ui_layout: data.ui_layout,
-                                taskbar_auto_expand: data.taskbar_auto_expand
+                                taskbar_auto_expand: data.taskbar_auto_expand,
+                                layout_chosen: data.layout_chosen
                             };
                             // LW: state updated, no log needed
                             return updated;
@@ -297,7 +300,7 @@
             };
             
             return(
-                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, ldapEnabled, oidcEnabled, oidcButtonText }}>
+                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground }}>
                     {children}
                 </AuthContext.Provider>
             );

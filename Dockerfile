@@ -41,9 +41,9 @@ VOLUME ["/app/config", "/app/logs"]
 # Switch to non-root user
 USER pegaprox
 
-EXPOSE 5000
+EXPOSE 5000 5001 5002
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('https://localhost:5000/api/auth/check', context=__import__('ssl')._create_unverified_context())" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('https://localhost:5000/api/health', context=__import__('ssl')._create_unverified_context())" || exit 1
 
 ENTRYPOINT ["python3", "pegaprox_multi_cluster.py"]

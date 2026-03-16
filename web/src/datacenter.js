@@ -8,6 +8,7 @@
         function DatacenterTab({ clusterId, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
+            const { isCorporate } = useLayout();
             const [activeSection, setActiveSection] = useState('summary');
             const [loading, setLoading] = useState(true);
             const [dcStatus, setDcStatus] = useState(null);
@@ -250,17 +251,17 @@
             };
 
             const sections = [
-                { id: 'summary', labelKey: 'summary', icon: Icons.Activity },
-                { id: 'cluster', labelKey: 'cluster', icon: Icons.Server },
-                { id: 'options', labelKey: 'options', icon: Icons.Settings },
-                { id: 'storage', labelKey: 'storage', icon: Icons.HardDrive },
-                { id: 'sdn', labelKey: 'sdn', icon: Icons.Network },
-                { id: 'backup', labelKey: 'backup', icon: Icons.Clock },
-                { id: 'replication', labelKey: 'replication', icon: Icons.RefreshCw },
-                { id: 'ha', labelKey: 'proxmoxNativeHa', icon: Icons.Activity },
-                { id: 'cpucompat', labelKey: 'cpuCompatibility', icon: Icons.Cpu },
-                { id: 'firewall', labelKey: 'firewall', icon: Icons.Shield },
-                { id: 'ceph', labelKey: 'ceph', icon: Icons.Database },
+                { id: 'summary', labelKey: 'summary', icon: Icons.Activity, descKey: 'summary' },
+                { id: 'cluster', labelKey: 'cluster', icon: Icons.Server, descKey: 'cluster' },
+                { id: 'options', labelKey: 'options', icon: Icons.Settings, descKey: 'options' },
+                { id: 'storage', labelKey: 'storage', icon: Icons.HardDrive, descKey: 'storage' },
+                { id: 'sdn', labelKey: 'sdn', icon: Icons.Network, descKey: 'sdn' },
+                { id: 'backup', labelKey: 'backup', icon: Icons.Clock, descKey: 'backup' },
+                { id: 'replication', labelKey: 'replication', icon: Icons.RefreshCw, descKey: 'replication' },
+                { id: 'ha', labelKey: 'proxmoxNativeHa', icon: Icons.Activity, descKey: 'ha' },
+                { id: 'cpucompat', labelKey: 'cpuCompatibility', icon: Icons.Cpu, descKey: 'cpucompat' },
+                { id: 'firewall', labelKey: 'firewall', icon: Icons.Shield, descKey: 'firewall' },
+                { id: 'ceph', labelKey: 'ceph', icon: Icons.Database, descKey: 'ceph' },
             ];
 
             const storageTypes = [
@@ -1211,8 +1212,22 @@
             }
 
             return (
-                <div className="flex gap-6">
+                <div className={`flex ${isCorporate ? 'gap-0' : 'gap-6'}`}>
                     {/* Sidebar */}
+                    {isCorporate ? (
+                        <div className="corp-subnav" style={{position: 'sticky', top: 0, alignSelf: 'flex-start'}}>
+                            {sections.map(section => (
+                                <button
+                                    key={section.id}
+                                    onClick={() => setActiveSection(section.id)}
+                                    className={`corp-subnav-item ${activeSection === section.id ? 'active' : ''}`}
+                                >
+                                    <section.icon style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />
+                                    {t(section.labelKey)}
+                                </button>
+                            ))}
+                        </div>
+                    ) : (
                     <div className="w-48 flex-shrink-0">
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-3 sticky top-6">
                             <nav className="space-y-1">
@@ -1233,9 +1248,22 @@
                             </nav>
                         </div>
                     </div>
+                    )}
 
                     {/* Content */}
-                    <div className="flex-1 space-y-6">
+                    <div className={`flex-1 ${isCorporate ? 'space-y-3 p-3' : 'space-y-6'}`}>
+                        {/* LW: Mar 2026 - corporate section header for active section */}
+                        {isCorporate && (() => {
+                            const sec = sections.find(s => s.id === activeSection);
+                            if (!sec) return null;
+                            const SIcon = sec.icon;
+                            return (
+                                <div className="corp-dc-section-header">
+                                    <SIcon className="corp-dc-section-icon" style={{width: 16, height: 16}} />
+                                    <span className="corp-dc-section-title">{t(sec.labelKey)}</span>
+                                </div>
+                            );
+                        })()}
                         {/* Summary */}
                         {activeSection === 'summary' && dcStatus && (
                             <>
@@ -1691,7 +1719,39 @@
 
                         {/* Storage */}
                         {activeSection === 'storage' && (
-                            <div className="space-y-4">
+                            <div className={isCorporate ? 'space-y-2' : 'space-y-4'}>
+                                {/* NS: corporate storage cards variant */}
+                                {isCorporate && (
+                                    <div style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                                        <div className="flex justify-between items-center" style={{padding: '6px 12px', borderBottom: '1px solid var(--corp-divider)'}}>
+                                            <span className="text-[12px] font-medium" style={{color: 'var(--corp-text-secondary)'}}>Storage Configuration</span>
+                                            <div className="flex gap-1">
+                                                <button onClick={refreshStorage} className="corp-action-btn" title="Refresh"><Icons.RefreshCw style={{width: 14, height: 14}} /></button>
+                                                <button onClick={() => setShowAddStorage(true)} className="corp-action-btn" style={{color: 'var(--corp-accent)'}} title={t('add')}><Icons.Plus style={{width: 14, height: 14}} /></button>
+                                            </div>
+                                        </div>
+                                        {(!storage || storage.length === 0) ? (
+                                            <div className="p-4 text-center text-[12px]" style={{color: 'var(--corp-text-muted)'}}>No storage configured</div>
+                                        ) : storage.map((s, idx) => {
+                                            const isShared = s.shared || ['nfs', 'cifs', 'rbd', 'cephfs', 'iscsi', 'pbs'].includes(s.type);
+                                            const typeColor = isShared ? {bg: 'rgba(73,175,217,0.12)', color: '#49afd9'} : s.type === 'lvm' || s.type === 'lvmthin' || s.type === 'zfspool' ? {bg: 'rgba(155,89,182,0.12)', color: '#9b59b6'} : {bg: 'rgba(114,139,154,0.12)', color: '#728b9a'};
+                                            return (
+                                                <div key={idx} className="corp-storage-card">
+                                                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${s.disable ? 'bg-gray-500' : 'bg-green-500'}`}></span>
+                                                    <span className="font-medium text-[13px] w-28 truncate" style={{color: 'var(--color-text)'}}>{s.storage}</span>
+                                                    <span className="corp-storage-type-badge" style={{background: typeColor.bg, color: typeColor.color, border: `1px solid ${typeColor.color}33`}}>{s.type}</span>
+                                                    {isShared && <span className="corp-storage-type-badge" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515', border: '1px solid rgba(96,181,21,0.2)'}}>shared</span>}
+                                                    <span className="text-[11px] flex-1 truncate" style={{color: 'var(--corp-text-muted)'}}>{s.path || s.server || s.pool || s.portal || s.export || ''}</span>
+                                                    <div className="flex gap-0.5 ml-auto">
+                                                        <button onClick={() => { setNewStorage({...s, enabled: !s.disable}); setShowAddStorage(true); }} className="corp-action-btn" title="Edit"><Icons.Cog style={{width: 13, height: 13}} /></button>
+                                                        <button onClick={() => deleteStorage(s.storage)} className="corp-action-btn danger" title={t('delete')}><Icons.Trash style={{width: 13, height: 13}} /></button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                                {!isCorporate && (
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                     <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
                                         <h3 className="font-semibold flex items-center gap-2">
@@ -1797,11 +1857,12 @@
                                         </table>
                                     </div>
                                 </div>
+                                )}
 
                                 {/* Multipath Easy Setup */}
-                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
-                                    <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
-                                        <h3 className="font-semibold flex items-center gap-2">
+                                <div className={isCorporate ? '' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'} style={isCorporate ? {background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'} : undefined}>
+                                    <div className={isCorporate ? 'flex justify-between items-center' : 'p-4 border-b border-proxmox-border flex justify-between items-center'} style={isCorporate ? {padding: '6px 12px', borderBottom: '1px solid var(--corp-divider)'} : undefined}>
+                                        <h3 className={isCorporate ? 'text-[12px] font-medium flex items-center gap-2' : 'font-semibold flex items-center gap-2'} style={isCorporate ? {color: 'var(--corp-text-secondary)'} : undefined}>
                                             <Icons.Layers className="text-purple-400" />
                                             Multipath Redundancy
                                         </h3>

@@ -1,0 +1,25 @@
+# PegaProx Docker Compose
+# NS: just run: docker compose up -d
+
+services:
+  pegaprox:
+    image: ghcr.io/pegaprox/pegaprox:latest
+    # build: .  # uncomment to build locally
+    container_name: pegaprox
+    ports:
+      - "5000:5000"   # web UI + API
+      - "5001:5001"   # VNC websocket (noVNC console)
+      - "5002:5002"   # SSH websocket (xterm.js)
+    volumes:
+      - pegaprox-config:/app/config
+      - pegaprox-logs:/app/logs
+      # - ./ssl:/app/ssl   # mount custom certs if needed
+    restart: unless-stopped
+    # environment:
+    #   PEGAPROX_BEHIND_PROXY: "true"           # behind nginx/haproxy
+    #   PEGAPROX_TRUSTED_PROXIES: "172.16.0.0/12"
+    #   PEGAPROX_ALLOWED_ORIGINS: "https://pegaprox.example.com"
+
+volumes:
+  pegaprox-config:
+  pegaprox-logs:

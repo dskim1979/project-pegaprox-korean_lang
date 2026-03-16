@@ -6,6 +6,7 @@
         function DatastoreTab({ clusterId, addToast, initialStorage, initialNode }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin } = useAuth();
+            const { isCorporate } = useLayout();
             const [loading, setLoading] = useState(true);
             const [datastores, setDatastores] = useState({ shared: [], local: {}, nodes: [] });
             const [selectedStorage, setSelectedStorage] = useState(null);
@@ -45,6 +46,7 @@
             const fetchingRef = useRef(false);
             const initialLoadDone = useRef(false);
             const _mountedRef = useRef(true);  // cleanup
+            const activeClusterIdRef = useRef(clusterId);
             
             // Storage Clusters state
             const [storageClusters, setStorageClusters] = useState([]);
@@ -165,6 +167,7 @@
             };
             
             useEffect(() => {
+                activeClusterIdRef.current = clusterId;
                 // LW: Reset ALL cluster-specific state when cluster changes
                 // This prevents showing stale data from previous cluster
                 setSelectedStorage(null);
@@ -225,6 +228,8 @@
                     const resp = await authFetch(`${API_URL}/clusters/${clusterId}/datastores`);
                     if (resp && resp.ok) {
                         const rawData = await resp.json();
+                        // LW: discard stale response if cluster changed during fetch
+                        if (clusterId !== activeClusterIdRef.current) return;
                         // console.log('datastores raw:', rawData);
                         
                         // Apply stable sorting
@@ -830,8 +835,20 @@
             };
             
             return (
-                <div className="space-y-4">
+                <div className={isCorporate ? 'space-y-3' : 'space-y-4'}>
                     {/* Tab Switcher */}
+                    {isCorporate ? (
+                        <div className="corp-tab-strip">
+                            <button onClick={() => setActiveTab('browse')} className={activeTab === 'browse' ? 'active' : ''}>
+                                <Icons.Folder style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />
+                                {t('browse') || 'Browse'}
+                            </button>
+                            <button onClick={() => { setActiveTab('balancing'); fetchStorageClusters(); }} className={activeTab === 'balancing' ? 'active' : ''}>
+                                <Icons.Zap style={{width: 14, height: 14, display: 'inline', marginRight: 6}} />
+                                Storage Balancing
+                            </button>
+                        </div>
+                    ) : (
                     <div className="flex gap-2">
                         <button
                             onClick={() => setActiveTab('browse')}
@@ -852,6 +869,7 @@
                             Storage Balancing
                         </button>
                     </div>
+                    )}
                     
                     {activeTab === 'browse' ? (
                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

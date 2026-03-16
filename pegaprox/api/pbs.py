@@ -267,6 +267,9 @@ def get_pbs_snapshots(pbs_id, store):
     mgr = pbs_managers[pbs_id]
     ns = request.args.get('ns', None)
     result = mgr.get_snapshots(store, ns=ns)
+    # #143: don't mask errors as empty arrays
+    if 'error' in result:
+        return jsonify({'error': result['error']}), result.get('status_code', 502)
     return jsonify(result.get('data', []))
 
 
@@ -279,6 +282,8 @@ def get_pbs_groups(pbs_id, store):
     mgr = pbs_managers[pbs_id]
     ns = request.args.get('ns', None)
     result = mgr.get_groups(store, ns=ns)
+    if 'error' in result:
+        return jsonify({'error': result['error']}), result.get('status_code', 502)
     return jsonify(result.get('data', []))
 
 

@@ -597,6 +597,12 @@ def main(debug_mode=False):
 
     try:
         load_vmware_servers()
+        # NS: register ESXi hosts as XHM-capable clusters
+        from pegaprox.core.esxi_cluster import ESXiClusterManager
+        for vmw_id, vmw_mgr in g.vmware_managers.items():
+            if getattr(vmw_mgr, 'server_type', '') == 'esxi':
+                g.cluster_managers[vmw_id] = ESXiClusterManager(vmw_id, vmw_mgr)
+                logging.info(f"Registered ESXi host '{vmw_mgr.name}' as XHM cluster {vmw_id}")
     except Exception as e:
         logging.warning(f"Failed to load VMware servers at startup: {e}")
 
@@ -619,6 +625,10 @@ def main(debug_mode=False):
 
     start_cross_cluster_replication_thread()
     print("Started cross-cluster replication scheduler thread")
+
+    from pegaprox.background.site_recovery import start_heartbeat
+    start_heartbeat()
+    print("Started site recovery heartbeat monitor")
 
     # Warm up pool cache
     def warmup_pool_cache():
@@ -893,14 +903,25 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                             continue
 
                     host_header = ''
+                    fwd_proto = ''
+                    fwd_port = ''
                     for line in request.split('\r\n'):
-                        if line.lower().startswith('host:'):
+                        low = line.lower()
+                        if low.startswith('host:'):
                             host_value = line.split(':', 1)[1].strip()
                             if ':' in host_value:
                                 host_header = host_value.rsplit(':', 1)[0]
                             else:
                                 host_header = host_value
-                            break
+                        elif low.startswith('x-forwarded-proto:'):
+                            fwd_proto = line.split(':', 1)[1].strip().lower()
+                        elif low.startswith('x-forwarded-port:'):
+                            fwd_port = line.split(':', 1)[1].strip()
+
+                    # behind reverse proxy with SSL termination? skip redirect (#125)
+                    from pegaprox.utils.audit import _is_trusted_proxy
+                    if fwd_proto == 'https' and _is_trusted_proxy(addr[0]):
+                        continue
 
                     redirect_host = host_header or 'localhost'
                     if domain:
@@ -909,10 +930,11 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                         else:
                             redirect_host = domain
 
-                    if https_port == 443:
+                    port = int(fwd_port) if fwd_port else https_port
+                    if port == 443:
                         redirect_url = f'https://{redirect_host}{path}'
                     else:
-                        redirect_url = f'https://{redirect_host}:{https_port}{path}'
+                        redirect_url = f'https://{redirect_host}:{port}{path}'
 
                     response = (
                         f"HTTP/1.1 301 Moved Permanently\r\n"
@@ -1135,6 +1157,20 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                 if first_byte[0] == 0x16 or first_byte[0] == 0x80:
                     return super().wrap_socket_and_handle(client_socket, address)
                 else:
+                    # NS: #125 - reverse proxy with SSL termination? serve as plain HTTP
+                    # only trust forwarded headers from loopback / configured trusted proxies
+                    from pegaprox.utils.audit import _is_trusted_proxy
+                    if _is_trusted_proxy(address[0]):
+                        try:
+                            peek = client_socket.recv(8192, socket.MSG_PEEK)
+                            if b'x-forwarded-proto' in peek.lower():
+                                for hdr in peek.decode('utf-8', errors='ignore').split('\r\n'):
+                                    if hdr.lower().startswith('x-forwarded-proto:'):
+                                        if hdr.split(':', 1)[1].strip().lower() == 'https':
+                                            return self.handle(client_socket, address)
+                                        break
+                        except Exception:
+                            pass
                     self._handle_http_redirect(client_socket, address)
                     return
             except Exception as e:
@@ -1186,11 +1222,25 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                     else:
                         host = d
 
-                server_port = self.server_port
-                if server_port == 443:
+                # NS: #125 - respect proxy headers so we don't redirect to internal port
+                fwd_proto = ''
+                fwd_port = ''
+                for line in request.split('\r\n'):
+                    lower = line.lower()
+                    if lower.startswith('x-forwarded-proto:'):
+                        fwd_proto = line.split(':', 1)[1].strip().lower()
+                    elif lower.startswith('x-forwarded-port:'):
+                        fwd_port = line.split(':', 1)[1].strip()
+
+                if fwd_proto == 'https':
+                    # already behind SSL-terminating proxy, don't redirect
+                    return
+
+                port = int(fwd_port) if fwd_port else self.server_port
+                if port == 443:
                     redirect_url = f'https://{host}{path}'
                 else:
-                    redirect_url = f'https://{host}:{server_port}{path}'
+                    redirect_url = f'https://{host}:{port}{path}'
 
                 response = (
                     f"HTTP/1.1 301 Moved Permanently\r\n"

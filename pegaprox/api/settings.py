@@ -20,7 +20,7 @@ from pegaprox.core.db import get_db, ENCRYPTION_AVAILABLE
 
 import requests
 from pegaprox.utils.auth import require_auth, load_users, save_users, validate_session, TOTP_AVAILABLE, ARGON2_AVAILABLE, _check_default_password_in_use, verify_password, needs_password_rehash
-from pegaprox.utils.sanitization import sanitize_identifier
+from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
@@ -1302,7 +1302,26 @@ def update_server_settings():
                         restart_required = True
                     else:
                         return jsonify({'error': 'Invalid key format'}), 400
-        
+
+            # Handle login background upload - NS Mar 2026
+            if 'login_background' in request.files:
+                bg_file = request.files['login_background']
+                if bg_file.filename:
+                    bg_content = bg_file.read()
+                    if len(bg_content) > 2 * 1024 * 1024:
+                        return jsonify({'error': 'Login background too large (max 2MB)'}), 400
+                    ext = os.path.splitext(bg_file.filename)[1].lower()
+                    if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.svg'):
+                        return jsonify({'error': 'Invalid image format'}), 400
+                    from pathlib import Path as _Path
+                    bg_path = os.path.join(IMAGES_DIR, 'login_bg' + ext)
+                    # remove old bg files first
+                    for old in _Path(IMAGES_DIR).glob('login_bg.*'):
+                        old.unlink(missing_ok=True)
+                    with open(bg_path, 'wb') as f:
+                        f.write(bg_content)
+                    settings['login_background'] = '/images/login_bg' + ext
+
         # save
         logging.info(f"[Settings] Saving settings. SMTP enabled={settings.get('smtp_enabled')}, host={settings.get('smtp_host')}")
         if save_server_settings(settings):
@@ -1333,6 +1352,18 @@ def update_server_settings():
     except Exception as e:
         logging.error(f"Error updating server settings: {e}")
         return jsonify({'error': safe_error(e, 'Settings update failed')}), 500
+
+@bp.route('/api/settings/login-background', methods=['DELETE'])
+@require_auth(roles=[ROLE_ADMIN])
+def delete_login_background():
+    """Remove custom login background"""
+    from pathlib import Path as _Path
+    for old in _Path(IMAGES_DIR).glob('login_bg.*'):
+        old.unlink(missing_ok=True)
+    settings = load_server_settings()
+    settings['login_background'] = ''
+    save_server_settings(settings)
+    return jsonify({'success': True})
 
 @bp.route('/api/settings/server/restart', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
@@ -1641,9 +1672,7 @@ def backup_config():
         return response
         
     except Exception as e:
-        logging.error(f"Config backup failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"Config backup failed: {e}")
         return jsonify({'error': safe_error(e, 'Backup creation failed')}), 500
 
 def _encrypt_backup(data: str, password: str) -> bytes:
@@ -2030,9 +2059,7 @@ def restore_config():
         return jsonify(results)
         
     except Exception as e:
-        logging.error(f"Config restore failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"Config restore failed: {e}")
         return jsonify({'error': safe_error(e, 'Config restore failed')}), 500
 
 # ============================================
@@ -2296,7 +2323,7 @@ def get_audit_log_api():
     # Optional filters
     user_filter = request.args.get('user')
     action_filter = request.args.get('action')
-    limit = int(request.args.get('limit', 500))
+    limit = max(1, min(10000, sanitize_int(request.args.get('limit', 500), default=500)))
     verify = request.args.get('verify', '').lower() == 'true'
     
     # Get from database with optional integrity verification
@@ -2329,7 +2356,7 @@ def get_cluster_audit_log_api(cluster_id):
     
     # Optional filters
     vmid = request.args.get('vmid')
-    limit = int(request.args.get('limit', 100))
+    limit = max(1, min(10000, sanitize_int(request.args.get('limit', 100), default=100)))
     
     # Get from database
     database = get_db()
@@ -2532,9 +2559,7 @@ def get_compliance_status():
             'default_password_warning': _check_default_password_in_use()
         })
     except Exception as e:
-        logging.error(f"Error getting compliance status: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"Error getting compliance status: {e}")
         return jsonify({'error': safe_error(e, 'Compliance check failed')}), 500
 
 @bp.route('/api/security/cors', methods=['GET'])
@@ -2923,9 +2948,7 @@ Generated by: {username}
         return response
         
     except Exception as e:
-        logging.error(f"Support bundle generation failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"Support bundle generation failed: {e}")
         return jsonify({'error': f'Failed to generate support bundle: {str(e)}'}), 500
 
 
@@ -2949,7 +2972,7 @@ def check_cluster_updates(cluster_id):
         if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
             nodes_data = mgr.get_nodes()
         else:
-            host = mgr.current_host or mgr.config.host
+            host = mgr.host
             url = f"https://{host}:8006/api2/json/nodes"
             r = mgr._create_session().get(url, timeout=10)
             if r.status_code != 200:
@@ -3447,6 +3470,29 @@ def start_rolling_update(cluster_id):
                     except Exception as maint_err:
                         logging.error(f"[RollingUpdate] Failed to exit maintenance on {node_name}: {maint_err}")
                         mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ Failed to exit maintenance on {node_name}: {maint_err}")
+
+                    # NS Mar 2026 - #141: STOP the rolling update on node failure.
+                    # continuing to the next node is dangerous for HCI (Ceph, etc.)
+                    # because we'd pull a second node out while the first may still be down
+                    mgr._rolling_update['status'] = 'paused'
+                    mgr._rolling_update['current_step'] = 'paused_failure'
+                    mgr._rolling_update['paused_reason'] = 'node_failure'
+                    mgr._rolling_update['paused_details'] = {
+                        'node': node_name,
+                        'error': safe_error(e, 'Node update failed'),
+                        'message': f"Update failed on {node_name}. Verify the node is healthy before continuing. For HCI clusters, proceeding with a degraded node can cause data loss."
+                    }
+                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⏸ PAUSED — node failure is unsafe to continue. Check {node_name} manually, then Continue or Cancel.")
+                    logging.warning(f"[RollingUpdate] Paused after failure on {node_name} - waiting for user")
+                    while mgr._rolling_update.get('status') == 'paused':
+                        time.sleep(2)
+                    if mgr._rolling_update.get('status') == 'cancelled':
+                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Rolling update cancelled by user after failure on {node_name}")
+                        break
+                    elif mgr._rolling_update.get('status') == 'running':
+                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ▶ Resumed by user after failure on {node_name}")
+                        mgr._rolling_update['paused_reason'] = None
+                        mgr._rolling_update['paused_details'] = None
             
             # Final summary
             completed = len(mgr._rolling_update['completed_nodes'])
@@ -3634,7 +3680,7 @@ def get_node_repos(cluster_id, node):
         return jsonify({'error': 'Repository management not available for XCP-ng clusters'}), 400
 
     try:
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
 
         # Get all repos via Proxmox API
         file_url = f"https://{host}:8006/api2/json/nodes/{node}/apt/repositories"
@@ -3809,7 +3855,7 @@ def update_node_repo(cluster_id, node, repo_id):
         repo_name = repo_info['name']
     
     try:
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
         
         # Use Proxmox API to modify repository
         url = f"https://{host}:8006/api2/json/nodes/{node}/apt/repositories"
@@ -3917,7 +3963,7 @@ def refresh_node_repos(cluster_id, node):
             return jsonify({'error': f'Failed to refresh: {str(e)}'}), 500
 
     try:
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
         url = f"https://{host}:8006/api2/json/nodes/{node}/apt/update"
 
         r = mgr._create_session().post(url, timeout=30)
@@ -3972,7 +4018,7 @@ def test_ldap():
     config = {
         'enabled': True,  # Force enabled for test
         'server': data.get('ldap_server', saved.get('ldap_server', '')),
-        'port': int(data.get('ldap_port', saved.get('ldap_port', 389))),
+        'port': sanitize_int(data.get('ldap_port', saved.get('ldap_port', 389)), default=389, min_val=1, max_val=65535),
         'use_ssl': data.get('ldap_use_ssl', saved.get('ldap_use_ssl', False)),
         'use_starttls': data.get('ldap_use_starttls', saved.get('ldap_use_starttls', False)),
         'bind_dn': data.get('ldap_bind_dn', saved.get('ldap_bind_dn', '')),

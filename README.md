@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.1.3--beta-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.9.2--beta-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0--License-orange" alt="License"/>
 </p>
@@ -134,22 +134,32 @@ pip install -r requirements.txt
 python3 pegaprox_multi_cluster.py
 ```
 
-### Docker Image
+### Docker
+```bash
+docker compose up -d
+```
+
+Or without Compose:
+```bash
+docker run -d --name pegaprox \
+  -p 5000:5000 -p 5001:5001 -p 5002:5002 \
+  -v pegaprox-config:/app/config \
+  -v pegaprox-logs:/app/logs \
+  --restart unless-stopped \
+  ghcr.io/pegaprox/pegaprox:latest
+```
+
+For local builds:
 ```bash
 git clone https://github.com/PegaProx/project-pegaprox.git
 cd project-pegaprox
-
-# Production
 docker build -t pegaprox .
 docker run -d --name pegaprox \
-  -p 5000:5000 \
+  -p 5000:5000 -p 5001:5001 -p 5002:5002 \
   -v pegaprox-config:/app/config \
   -v pegaprox-logs:/app/logs \
   --restart unless-stopped \
   pegaprox
-
-# Development
-docker run -p 5000:5000 pegaprox --debug
 ```
 
 ### Debian Package (.deb build)

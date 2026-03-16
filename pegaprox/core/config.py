@@ -41,8 +41,8 @@ def get_or_create_encryption_key():
     # Set file permissions to owner only (Unix)
     try:
         os.chmod(KEY_FILE, 0o600)
-    except:
-        pass
+    except Exception as e:
+        logging.warning(f"Could not set key file permissions: {e}")
     
     logging.info("Generated new encryption key")
     return key

@@ -43,7 +43,7 @@ def ws_live_updates(ws):
 
     # Authenticate via first message
     try:
-        auth_msg = ws.receive(timeout=10)
+        auth_msg = ws.receive(timeout=3)
         auth_data = json.loads(auth_msg)
         session_id = auth_data.get('session_id')
 
@@ -241,6 +241,50 @@ def sse_updates():
     response.headers['X-Accel-Buffering'] = 'no'
     response.headers['Connection'] = 'keep-alive'
     return response
+
+
+@bp.route('/api/sse/subscribe', methods=['POST'])
+@require_auth()
+def update_sse_subscription():
+    """Update cluster subscription for an active SSE client without reconnecting.
+    NS: Mar 2026 - avoids 200-500ms data gap on sidebar toggle
+    """
+    data = request.json or {}
+    client_id = data.get('client_id')
+    requested = data.get('clusters')  # list of cluster IDs or None for all
+
+    if not client_id:
+        return jsonify({'error': 'client_id required'}), 400
+
+    username = request.session.get('user', 'unknown')
+
+    # RBAC: what clusters is this user allowed to see?
+    users = load_users()
+    user_data = users.get(username, {})
+    allowed = get_user_clusters(user_data)  # None = admin
+
+    # filter requested against allowed
+    if requested and len(requested) > 0:
+        if allowed is not None:
+            filtered = [c for c in requested if c in allowed]
+            new_sub = filtered if filtered else allowed
+        else:
+            new_sub = requested  # admin sees all
+    else:
+        new_sub = allowed  # None = everything user can see
+
+    with sse_clients_lock:
+        client = sse_clients.get(client_id)
+        if not client:
+            # NS: return 200 not 404 — client may have reconnected with a new ID
+            # (token refresh cycle), frontend treats subscribe as best-effort anyway
+            return jsonify({'ok': False, 'reason': 'client_not_found'})
+        if client.get('user') != username:
+            return jsonify({'error': 'Unauthorized'}), 403
+        client['clusters'] = new_sub
+
+    logging.debug(f"[SSE] Subscription updated for {client_id}: {new_sub}")
+    return jsonify({'ok': True, 'clusters': new_sub})
 
 
 @bp.route('/api/settings/smtp/test', methods=['POST'])

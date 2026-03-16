@@ -17,7 +17,7 @@ bp = Blueprint('ceph', __name__)
 
 
 def _ceph_url(manager, node, sub=''):
-    host = manager.current_host or manager.config.host
+    host = manager.host
     return f"https://{host}:8006/api2/json/nodes/{node}/ceph{sub}"
 
 
@@ -70,7 +70,7 @@ def _valid_image(name):
 def _get_any_online_node(manager):
     """NS: grab first online node - same approach as get_ceph_overview"""
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         nr = session.get(f"https://{host}:8006/api2/json/nodes", timeout=5)
         if nr.status_code == 200:
@@ -86,17 +86,16 @@ def _resolve_node_ip(manager, node_name):
     """MK: resolve node name to IP via cluster/status API
     We need the actual IP for SSH, not the node name."""
     try:
-        host = manager.current_host or manager.config.host
         session = manager._create_session()
-        resp = session.get(f"https://{host}:8006/api2/json/cluster/status", timeout=8)
+        resp = session.get(f"https://{manager.host}:8006/api2/json/cluster/status", timeout=8)
         if resp.status_code == 200:
             for item in resp.json().get('data', []):
                 if item.get('type') == 'node' and item.get('name') == node_name:
-                    return item.get('ip', host)
+                    return item.get('ip', manager.raw_host)
     except:
         pass
-    # fallback to cluster host
-    return manager.current_host or manager.config.host
+    # fallback — raw IP for SSH, not bracketed
+    return manager.raw_host
 
 
 def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
@@ -181,7 +180,7 @@ def get_ceph_overview(cluster_id):
     }
 
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
 
         # Find first online node to query Ceph

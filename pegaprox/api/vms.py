@@ -11,6 +11,7 @@ import uuid
 import hashlib
 import re
 import ssl
+import socket
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request
 
@@ -26,8 +27,10 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immedi
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error
 from pegaprox.utils.ssh import get_paramiko
+from pegaprox.utils.sanitization import sanitize_int
 from urllib.parse import urlencode, quote as url_quote
 import signal
+import requests.exceptions
 from pegaprox.api.realtime import sock
 
 bp = Blueprint('vms', __name__)
@@ -72,7 +75,7 @@ def get_datacenter_status(cluster_id):
             return jsonify({'error': safe_error(e, 'Failed to get XCP-ng status')}), 500
 
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
 
         # get cluster status
         status_url = f"https://{host}:8006/api2/json/cluster/status"
@@ -138,6 +141,9 @@ def get_datacenter_status(cluster_id):
                 'storage': {'total': total_disk, 'used': used_disk, 'percent': round(used_disk / total_disk * 100, 1) if total_disk > 0 else 0}
             }
         })
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for datacenter/status: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get datacenter status')}), 500
 
@@ -193,7 +199,7 @@ def get_cluster_info(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
 
         # Try corosync config first (has ring0_addr for join info)
@@ -247,7 +253,7 @@ def get_join_info(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # try to get join info
         url = f"https://{host}:8006/api2/json/cluster/config/join"
@@ -330,6 +336,9 @@ def get_join_info(cluster_id):
         
         return jsonify(result)
 
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for join-info: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get cluster info')}), 500
 
@@ -346,7 +355,7 @@ def get_datacenter_options(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/options"
         response = manager._create_session().get(url, timeout=5)
         
@@ -376,7 +385,7 @@ def set_datacenter_options(cluster_id):
         'notify', 'registered-tags', 'user-tag-access', 'crs',
     }
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/options"
         raw_data = request.json or {}
         data = {k: v for k, v in raw_data.items() if k in ALLOWED_DC_OPTIONS}
@@ -406,7 +415,7 @@ def get_storage_list(cluster_id):
         return jsonify(manager.get_storages())
 
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/storage"
         r = manager._create_session().get(url, timeout=5)
 
@@ -434,7 +443,7 @@ def get_datastores(cluster_id):
         return jsonify({'shared': storages, 'local': {}})
 
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # get storage configs
         storage_url = f"https://{host}:8006/api2/json/storage"
@@ -492,6 +501,9 @@ def get_datastores(cluster_id):
             'local': local_storages,
             'nodes': nodes
         })
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for datastores: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get storage list')}), 500
 
@@ -507,7 +519,7 @@ def get_datastore_content(cluster_id, storage_name):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         node = request.args.get('node')
         
         # If no node specified, find first node that has this storage
@@ -548,6 +560,9 @@ def get_datastore_content(cluster_id, storage_name):
                     
             return jsonify(content)
         return jsonify([])
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for storage content: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
     except Exception as e:
         logging.error(f"Error getting datastore content: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get datastore content')}), 500
@@ -565,7 +580,7 @@ def delete_datastore_content(cluster_id, storage_name, volid):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         node = request.args.get('node')
         
         if not node:
@@ -678,7 +693,7 @@ def upload_to_datastore(cluster_id, storage_name):
 
     tmp_path = None
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         node = request.form.get('node') or request.args.get('node')
         content_type = request.form.get('content', 'iso')  # iso, vztmpl, etc.
 
@@ -827,7 +842,7 @@ def download_iso_from_url(cluster_id, storage_name):
         if not any(filename.lower().endswith(ext) for ext in ['.iso', '.img', '.qcow2', '.raw']):
             filename += '.iso'
         
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Find node if not specified
         if not node:
@@ -1001,7 +1016,7 @@ def get_vm_backups(cluster_id, node, vm_type, vmid):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         
         backups = []
@@ -1021,25 +1036,28 @@ def get_vm_backups(cluster_id, node, vm_type, vmid):
             content = storage.get('content', '')
             if 'backup' not in content:
                 continue
-            
+
             stor_name = storage.get('storage')
-            # print(f"checking storage {stor_name}")  # debug - remove later
             content_url = f"https://{host}:8006/api2/json/nodes/{node}/storage/{stor_name}/content"
-            content_resp = session.get(content_url, params={'content': 'backup'}, timeout=10)
-            
+            try:
+                # #143: pass vmid filter — critical for PBS storages which can have
+                # thousands of backups. Without it PVE returns ALL backups and we hang
+                content_resp = session.get(content_url, params={'content': 'backup', 'vmid': vmid}, timeout=(5, 30))
+            except Exception:
+                continue
+
             if content_resp.status_code != 200:
-                continue  # meh just skip it
-            
+                continue
+
             items = content_resp.json().get('data', [])
-            
+
             for item in items:
                 # vzdump naming: vzdump-{type}-{vmid}-{date}_{time}.{ext}
                 # LW: proxmox naming conventions are weird but ok
                 volid = item.get('volid', '')
                 filename = volid.split('/')[-1] if '/' in volid else volid.split(':')[-1]
-                
-                # check if this backup belongs to our VM
-                # format is like: vzdump-qemu-100-2025_01_15-12_00_00.vma.zst
+
+                # double-check vmid match (PVE filter isn't always exact)
                 if f'-{vmid}-' in filename or filename.startswith(f'vzdump-{vm_type[:4]}-{vmid}'):
                     backups.append({
                         'volid': volid,
@@ -1089,7 +1107,7 @@ def create_vm_backup(cluster_id, node, vm_type, vmid):
     notes = data.get('notes', '')
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         
         # vzdump endpoint
@@ -1151,7 +1169,7 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Backup volume ID required'}), 400
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         
         # restore endpoint depends on vm type
@@ -1213,7 +1231,7 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
         return error
 
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         
         # volid format is usually: storage:backup/vzdump-xxx.vma.zst
@@ -1252,7 +1270,7 @@ def get_replication_jobs(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/replication"
         response = manager._create_session().get(url, timeout=5)
         
@@ -1276,7 +1294,7 @@ def get_ha_manager_status(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Get manager status (quorum, master, lrm for each node)
         url = f"https://{host}:8006/api2/json/cluster/ha/status/manager_status"
@@ -1309,7 +1327,7 @@ def get_firewall_options(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/options"
         r = manager._create_session().get(url, timeout=5)
         
@@ -1331,7 +1349,7 @@ def set_firewall_options(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/options"
         data = request.json or {}
         
@@ -1357,7 +1375,7 @@ def get_firewall_rules(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/rules"
         r = manager._create_session().get(url, timeout=5)
         
@@ -1379,7 +1397,7 @@ def create_firewall_rule(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/rules"
         data = request.json or {}
         
@@ -1405,7 +1423,7 @@ def update_firewall_rule(cluster_id, pos):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/rules/{pos}"
         data = request.json or {}
         
@@ -1429,7 +1447,7 @@ def delete_firewall_rule(cluster_id, pos):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/rules/{pos}"
         
         response = manager._create_session().delete(url, timeout=10)
@@ -1453,7 +1471,7 @@ def get_firewall_groups(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/groups"
         response = manager._create_session().get(url, timeout=5)
         
@@ -1476,7 +1494,7 @@ def get_firewall_aliases(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/aliases"
         response = manager._create_session().get(url, timeout=5)
         
@@ -1499,7 +1517,7 @@ def get_firewall_ipsets(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/firewall/ipset"
         response = manager._create_session().get(url, timeout=5)
         
@@ -1515,7 +1533,7 @@ def get_firewall_ipsets(cluster_id):
 # ============================================
 
 def _vm_fw_url(manager, node, vmtype, vmid, sub=''):
-    host = manager.current_host or manager.config.host
+    host = manager.host
     return f"https://{host}:8006/api2/json/nodes/{node}/{vmtype}/{vmid}/firewall{sub}"
 
 
@@ -1866,7 +1884,7 @@ def get_pci_mappings(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/mapping/pci"
         response = manager._create_session().get(url, timeout=5)
         
@@ -1889,7 +1907,7 @@ def get_usb_mappings(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/mapping/usb"
         response = manager._create_session().get(url, timeout=5)
         
@@ -2029,13 +2047,13 @@ def test_node_connection(cluster_id):
     node_ip = data.get('node_ip', '').strip()
     username = data.get('username', 'root')
     password = data.get('password', '')
-    ssh_port = int(data.get('ssh_port', 22))
-    
+    ssh_port = sanitize_int(data.get('ssh_port', 22), default=22, min_val=1, max_val=65535)
+
     if not node_ip:
         return jsonify({'success': False, 'error': 'Node IP is required'}), 400
     if not password:
         return jsonify({'success': False, 'error': 'SSH password is required'}), 400
-    
+
     try:
         # Connect via SSH
         ssh = paramiko.SSHClient()
@@ -2133,7 +2151,7 @@ def join_node_to_cluster(cluster_id):
     node_ip = data.get('node_ip', '').strip()
     username = data.get('username', 'root')
     password = data.get('password', '')
-    ssh_port = int(data.get('ssh_port', 22))
+    ssh_port = sanitize_int(data.get('ssh_port', 22), default=22, min_val=1, max_val=65535)
     link0_address = data.get('link0_address', '').strip()
     force_rejoin = data.get('force', False)  # LW: Feb 2026 - Clean old cluster config before join
     
@@ -2144,7 +2162,7 @@ def join_node_to_cluster(cluster_id):
         # Get join information from existing cluster
         # MK: Feb 2026 - Use direct API call (same as get_join_info which works)
         # instead of api_request() wrapper which was silently failing
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
         join_url = f"https://{host}:8006/api2/json/cluster/config/join"
         join_resp = mgr._create_session().get(join_url, timeout=10)
         
@@ -2389,7 +2407,7 @@ def check_can_remove_node(cluster_id, node_name):
         # Check if node is offline
         is_offline = True
         try:
-            host = mgr.current_host or mgr.config.host
+            host = mgr.host
             nodes_url = f"https://{host}:8006/api2/json/nodes"
             nodes_resp = mgr._create_session().get(nodes_url, timeout=10)
             nodes_list = nodes_resp.json().get('data', []) if nodes_resp.status_code == 200 else []
@@ -2404,7 +2422,7 @@ def check_can_remove_node(cluster_id, node_name):
         has_vms = False
         vm_count = 0
         try:
-            host = mgr.current_host or mgr.config.host
+            host = mgr.host
             session = mgr._create_session()
             resources = []
             for endpoint in [f"/nodes/{node_name}/qemu", f"/nodes/{node_name}/lxc"]:
@@ -2491,7 +2509,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         ssh_key_content = getattr(cluster_config, 'ssh_key', '') or ''
         
         # Find an online node to execute the removal from
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
         nodes_url = f"https://{host}:8006/api2/json/nodes"
         nodes_resp = mgr._create_session().get(nodes_url, timeout=10)
         nodes = nodes_resp.json().get('data', []) if nodes_resp.status_code == 200 else []
@@ -3162,8 +3180,12 @@ def get_vm_config_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    result = mgr.get_vm_config(node, vmid, vm_type)
-    
+    try:
+        result = mgr.get_vm_config(node, vmid, vm_type)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for vm config: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+
     if result['success']:
         return jsonify(result['config'])
     else:
@@ -3254,7 +3276,8 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
     
     mgr = cluster_managers[cluster_id]
     result = {'agent_running': False, 'hostname': None, 'os_pretty_name': None,
-              'os_id': None, 'os_version': None, 'os_kernel': None, 'os_machine': None}
+              'os_id': None, 'os_version': None, 'os_kernel': None, 'os_machine': None,
+              'ip_addresses': []}
     
     try:
         session = mgr._create_session()
@@ -3282,6 +3305,7 @@ def get_vm_guest_info_api(cluster_id, node, vm_type, vmid):
         except Exception:
             pass
 
+        # NS: #159 - reuse centralized IP fetch method
         try:
             ips = mgr._fetch_qemu_ips(node, vmid)
             result['ip_addresses'] = ips
@@ -3420,7 +3444,7 @@ def get_node_pci_devices(cluster_id, node):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/nodes/{node}/hardware/pci"
         response = manager._create_session().get(url, timeout=10)
         
@@ -3449,7 +3473,7 @@ def get_node_usb_devices(cluster_id, node):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/nodes/{node}/hardware/usb"
         response = manager._create_session().get(url, timeout=10)
         
@@ -3479,7 +3503,7 @@ def get_vm_passthrough_devices(cluster_id, node, vmid):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
         r = manager._create_session().get(url, timeout=10)
         
@@ -3548,7 +3572,7 @@ def add_pci_passthrough(cluster_id, node, vmid):
         return jsonify({'error': 'device_id required'}), 400
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Find next available hostpci slot
         config_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -3613,7 +3637,7 @@ def add_usb_passthrough(cluster_id, node, vmid):
         return jsonify({'error': 'Either vendorid+productid or hostbus+hostport required'}), 400
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Find next available usb slot
         config_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -3670,7 +3694,7 @@ def add_serial_port(cluster_id, node, vmid):
     serial_type = data.get('type', 'socket')  # socket, pty, or /dev/xxx
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Find next available serial slot
         config_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -3725,7 +3749,7 @@ def remove_passthrough_device(cluster_id, node, vmid, device_type, key):
         return jsonify({'error': f'Invalid key for {device_type}'}), 400
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Delete by setting to empty/delete
         update_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -5247,7 +5271,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         return
     
     manager = cluster_managers[cluster_id]
-    host = manager.current_host or manager.config.host
+    host = manager.host
     
     print(f"Target host: {host}")
     
@@ -5384,9 +5408,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         print(f"Session ended: sent {bytes_sent}, received {bytes_received}")
         
     except Exception as e:
-        print(f"ERROR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"VNC proxy error: {type(e).__name__}: {e}")
     finally:
         running = False
         if pve_ws:
@@ -5566,7 +5588,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             return
         
         manager = cluster_managers[cluster_id]
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         print(f"Target host: {host}")
         
@@ -5719,9 +5741,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             print(f"Session ended: sent {bytes_sent}, received {bytes_received}")
             
         except Exception as e:
-            print(f"ERROR: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+            logging.exception(f"VNC WS handler error: {type(e).__name__}: {e}")
         finally:
             if pve_ws:
                 try:
@@ -5729,7 +5749,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 except:
                     pass
             print(f"{'='*60}\n")
-    
+
     async def main():
         nonlocal server_ready
         ssl_context = None
@@ -5780,15 +5800,11 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 finally:
                     loop.close()
             else:
-                print(f"ERROR: VNC WebSocket Server RuntimeError: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
+                logging.exception(f"VNC WebSocket Server RuntimeError: {e}")
         except (KeyboardInterrupt, SystemExit):
             pass
         except Exception as e:
-            print(f"ERROR: VNC WebSocket Server crashed: {type(e).__name__}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logging.exception(f"VNC WebSocket Server crashed: {type(e).__name__}: {e}")
 
     ws_thread = threading.Thread(target=run_server, daemon=True)
     ws_thread.start()
@@ -5811,45 +5827,53 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
     print(f"VNC WEBSOCKET: {vm_type}/{vmid} on {node}")
     print(f"{'='*60}")
     
-    # Authenticate via session from query params
+    # NS: Mar 2026 - prefer WS token, session as legacy fallback
+    from pegaprox.utils.realtime import validate_ws_token
+    ws_token = request.args.get('token')
     session_id = request.args.get('session')
-    if not session_id:
-        print("ERROR: No session provided")
-        try:
-            ws.send('Authentication required')
-        except:
-            pass
+
+    auth_user = None
+    if ws_token:
+        token_data = validate_ws_token(ws_token)
+        if not token_data:
+            try: ws.send('Invalid or expired token')
+            except: pass
+            return
+        users = load_users()
+        user = users.get(token_data['user'], {})
+        user_perms = get_user_permissions(user)
+        if 'vm.console' not in user_perms and token_data['role'] != ROLE_ADMIN:
+            try: ws.send('Permission denied')
+            except: pass
+            return
+        auth_user = token_data['user']
+    elif session_id:
+        session = validate_session(session_id)
+        if not session:
+            try: ws.send('Invalid session')
+            except: pass
+            return
+        users = load_users()
+        user = users.get(session['user'], {})
+        user_perms = get_user_permissions(user)
+        if 'vm.console' not in user_perms and session['role'] != ROLE_ADMIN:
+            try: ws.send('Permission denied')
+            except: pass
+            return
+        auth_user = session['user']
+    else:
+        try: ws.send('Authentication required')
+        except: pass
         return
-    
-    session = validate_session(session_id)
-    if not session:
-        print("ERROR: Invalid session")
-        try:
-            ws.send('Invalid session')
-        except:
-            pass
-        return
-    
-    # Check permissions
-    users = load_users()
-    user = users.get(session['user'], {})
-    user_perms = get_user_permissions(user)
-    if 'vm.console' not in user_perms and session['role'] != ROLE_ADMIN:
-        print(f"ERROR: User {session['user']} lacks vm.console permission")
-        try:
-            ws.send('Permission denied')
-        except:
-            pass
-        return
-    
-    print(f"User {session['user']} authenticated for VNC")
+
+    print(f"User {auth_user} authenticated for VNC")
     
     if cluster_id not in cluster_managers:
         print(f"ERROR: Cluster {cluster_id} not found")
         return
     
     manager = cluster_managers[cluster_id]
-    host = manager.current_host or manager.config.host
+    host = manager.host
     
     print(f"Target host: {host}")
     
@@ -5985,9 +6009,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         print(f"Session ended: sent {bytes_sent}, received {bytes_received}")
         
     except Exception as e:
-        print(f"ERROR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"SSH proxy error: {type(e).__name__}: {e}")
     finally:
         running = False
         if pve_ws:
@@ -6655,9 +6677,7 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         logging.error(f"SSH error: {e}")
         ws.send(f'{{"status":"error","message":"SSH Fehler: {str(e)}"}}')
     except Exception as e:
-        logging.error(f"Shell error: {e}")
-        import traceback
-        traceback.print_exc()
+        logging.exception(f"Shell error: {e}")
         ws.send(f'{{"status":"error","message":"{str(e)}"}}')
     finally:
         try:
@@ -7249,6 +7269,20 @@ def get_templates_api(cluster_id, node):
 
     templates = manager.get_templates(node)
     return jsonify(templates)
+
+
+@bp.route('/api/clusters/<cluster_id>/xcp/os-types', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_xcp_os_types(cluster_id):
+    """OS types for XCP-ng VM creation from scratch"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'get_os_types'):
+        return jsonify([])
+    return jsonify(mgr.get_os_types())
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/qemu', methods=['POST'])

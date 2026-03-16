@@ -180,7 +180,7 @@ def get_cluster_multipath_status(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Get all nodes
         nodes_url = f"https://{host}:8006/api2/json/nodes"
@@ -261,7 +261,7 @@ def setup_multipath(cluster_id):
     skip_existing_config = data.get('skipExistingConfig', False)  # Don't overwrite existing config
 
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
 
         # Get nodes if not specified
         if not target_nodes:
@@ -611,7 +611,7 @@ def discover_iscsi_targets(cluster_id, node):
         portal = f"{portal}:3260"
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Use Proxmox API to scan iSCSI targets
         scan_url = f"https://{host}:8006/api2/json/nodes/{node}/scan/iscsi"
@@ -724,7 +724,7 @@ def get_sdn_overview(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         session = manager._create_session()
         
         result = {
@@ -871,7 +871,7 @@ def get_sdn_zones(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/zones"
         response = manager._create_session().get(url, timeout=10)
         
@@ -897,7 +897,7 @@ def create_sdn_zone(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/zones"
@@ -924,7 +924,7 @@ def update_sdn_zone(cluster_id, zone_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/zones/{zone_id}"
@@ -951,7 +951,7 @@ def delete_sdn_zone(cluster_id, zone_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/zones/{zone_id}"
         response = manager._create_session().delete(url, timeout=10)
@@ -978,7 +978,7 @@ def get_sdn_vnets(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1003,7 +1003,7 @@ def create_sdn_vnet(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets"
@@ -1030,7 +1030,7 @@ def update_sdn_vnet(cluster_id, vnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets/{vnet_id}"
@@ -1057,7 +1057,7 @@ def delete_sdn_vnet(cluster_id, vnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets/{vnet_id}"
         response = manager._create_session().delete(url, timeout=10)
@@ -1084,7 +1084,7 @@ def get_sdn_subnets(cluster_id, vnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets/{vnet_id}/subnets"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1109,7 +1109,7 @@ def create_sdn_subnet(cluster_id, vnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets/{vnet_id}/subnets"
@@ -1136,7 +1136,7 @@ def delete_sdn_subnet(cluster_id, vnet_id, subnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         # Subnet ID needs URL encoding as it contains CIDR notation
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets/{vnet_id}/subnets/{subnet_id}"
@@ -1163,7 +1163,7 @@ def apply_sdn_config(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         url = f"https://{host}:8006/api2/json/cluster/sdn"
         response = manager._create_session().put(url, timeout=30)
@@ -1194,7 +1194,7 @@ def get_sdn_controllers(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/controllers"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1219,7 +1219,7 @@ def create_sdn_controller(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/controllers"
@@ -1246,7 +1246,7 @@ def update_sdn_controller(cluster_id, controller_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/controllers/{controller_id}"
@@ -1273,7 +1273,7 @@ def delete_sdn_controller(cluster_id, controller_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/controllers/{controller_id}"
         response = manager._create_session().delete(url, timeout=10)
@@ -1304,7 +1304,7 @@ def get_sdn_ipams(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/ipams"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1329,7 +1329,7 @@ def create_sdn_ipam(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/ipams"
@@ -1356,7 +1356,7 @@ def update_sdn_ipam(cluster_id, ipam_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/ipams/{ipam_id}"
@@ -1383,7 +1383,7 @@ def delete_sdn_ipam(cluster_id, ipam_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/ipams/{ipam_id}"
         response = manager._create_session().delete(url, timeout=10)
@@ -1414,7 +1414,7 @@ def get_sdn_dns(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/dns"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1439,7 +1439,7 @@ def create_sdn_dns(cluster_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/dns"
@@ -1466,7 +1466,7 @@ def update_sdn_dns(cluster_id, dns_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/dns/{dns_id}"
@@ -1493,7 +1493,7 @@ def delete_sdn_dns(cluster_id, dns_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         
         url = f"https://{host}:8006/api2/json/cluster/sdn/dns/{dns_id}"
         response = manager._create_session().delete(url, timeout=10)
@@ -1523,7 +1523,7 @@ def get_sdn_zone_details(cluster_id, zone_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/zones/{zone_id}"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1546,7 +1546,7 @@ def get_sdn_vnet_details(cluster_id, vnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/sdn/vnets/{vnet_id}"
         response = manager._create_session().get(url, timeout=10)
         
@@ -1569,7 +1569,7 @@ def update_sdn_subnet(cluster_id, vnet_id, subnet_id):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         data = request.json or {}
         
         # URL encode the subnet ID (contains /)
@@ -1825,10 +1825,82 @@ def wipe_node_disk_api(cluster_id, node):
         return jsonify({'error': 'Confirmation required: send confirm_name matching the disk name'}), 400
 
     result = manager.wipe_disk(node, disk)
-    
+
     if result['success']:
         return jsonify(result)
     return jsonify({'error': result['error']}), 500
 
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/sr/create', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def create_sr_api(cluster_id, node):
+    """Create storage repository on XCP-ng node.
+    LW: type-specific dispatch to NFS, iSCSI, LVM, EXT creation methods."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng':
+        return jsonify({'error': 'SR creation is only available for XCP-ng clusters'}), 400
+
+    data = request.json or {}
+    sr_type = data.get('type', '')
+    name = data.get('name', '')
+    if not name:
+        return jsonify({'error': 'Storage name required'}), 400
+
+    if sr_type == 'nfs':
+        server = data.get('server', '')
+        path = data.get('path', '')
+        if not server or not path:
+            return jsonify({'error': 'NFS server and path required'}), 400
+        result = mgr.create_sr_nfs(node, name, server, path, data.get('nfsversion', '3'))
+    elif sr_type == 'iscsi':
+        target = data.get('target', '')
+        iqn = data.get('iqn', '')
+        scsi_id = data.get('scsi_id', '')
+        if not target or not iqn or not scsi_id:
+            return jsonify({'error': 'iSCSI target, IQN and SCSI ID required'}), 400
+        result = mgr.create_sr_iscsi(node, name, target, iqn, scsi_id,
+                                     data.get('port', 3260),
+                                     data.get('chap_user', ''), data.get('chap_pass', ''))
+    elif sr_type == 'lvm':
+        device = data.get('device', '')
+        if not device:
+            return jsonify({'error': 'Device path required'}), 400
+        result = mgr.create_sr_lvm(node, name, device)
+    elif sr_type == 'ext':
+        device = data.get('device', '')
+        if not device:
+            return jsonify({'error': 'Device path required'}), 400
+        result = mgr.create_sr_ext(node, name, device)
+    else:
+        return jsonify({'error': f'Unknown SR type: {sr_type}'}), 400
+
+    if result.get('success'):
+        return jsonify(result)
+    return jsonify({'error': result.get('error', 'SR creation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/sr/discover-iscsi', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def discover_iscsi_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    target = data.get('target', '')
+    if not target:
+        return jsonify({'error': 'Target address required'}), 400
+
+    result = mgr.discover_iscsi(node, target, data.get('port', 3260))
+    return jsonify(result)
 
 

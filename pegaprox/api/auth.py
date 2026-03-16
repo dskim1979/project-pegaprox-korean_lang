@@ -61,10 +61,9 @@ def oidc_authorize():
         return jsonify({'error': 'OIDC authentication is not configured'}), 400
     
     # NS: Auto-detect redirect URI if not configured
+    # never use Origin header - attacker can spoof it to steal OAuth tokens
     if not config.get('redirect_uri'):
-        # Build from request origin
-        origin = request.headers.get('Origin') or request.host_url.rstrip('/')
-        config['redirect_uri'] = f"{origin}/oidc/callback"
+        config['redirect_uri'] = f"{request.host_url.rstrip('/')}/oidc/callback"
         logging.info(f"[OIDC] Auto-detected redirect_uri: {config['redirect_uri']}")
     
     # MK: Generate state for CSRF protection
@@ -108,8 +107,7 @@ def oidc_callback():
     
     # NS: Auto-detect redirect URI if not configured (must match what was sent in authorize!)
     if not config.get('redirect_uri'):
-        origin = request.headers.get('Origin') or request.host_url.rstrip('/')
-        config['redirect_uri'] = f"{origin}/oidc/callback"
+        config['redirect_uri'] = f"{request.host_url.rstrip('/')}/oidc/callback"
     
     data = request.get_json() or {}
     code = data.get('code', '')
@@ -132,7 +130,8 @@ def oidc_callback():
     # Step 1: Exchange code for tokens
     token_data = oidc_exchange_code(config, code)
     if 'error' in token_data:
-        return jsonify({'error': token_data['error']}), 401
+        logging.warning(f"[OIDC] Token exchange failed: {token_data['error']}")
+        return jsonify({'error': 'Authentication failed - please try again'}), 401
 
     access_token = token_data.get('access_token', '')
     id_token_raw = token_data.get('id_token', '')
@@ -146,7 +145,7 @@ def oidc_callback():
         id_claims = oidc_decode_id_token(id_token_raw, expected_nonce=stored_nonce, config=config)
         if 'error' in id_claims:
             logging.warning(f"[OIDC] ID token validation failed: {id_claims['error']}")
-            return jsonify({'error': id_claims['error']}), 401
+            return jsonify({'error': 'Authentication failed - token validation error'}), 401
     
     # Step 3: Get user info from provider
     user_info = oidc_get_user_info(config, access_token)
@@ -589,7 +588,8 @@ def auth_login():
             'theme': user_theme,  # NS: Use default if empty
             'language': user.get('language', ''),
             'ui_layout': user.get('ui_layout', 'modern'),
-            'taskbar_auto_expand': user.get('taskbar_auto_expand', True)  # NS: Feb 2026
+            'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Feb 2026
+            'layout_chosen': user.get('layout_chosen', False)
         },
         'session_id': session_id,
         'default_theme': default_theme,  # NS: Include for frontend fallback
@@ -630,6 +630,12 @@ def auth_logout():
     response.delete_cookie('session_id')
     return response
 
+@bp.route('/api/health', methods=['GET'])
+def health_check():
+    """Unauthenticated health endpoint for Docker/LB probes"""
+    return jsonify({'status': 'ok', 'version': PEGAPROX_VERSION})
+
+
 @bp.route('/api/auth/check', methods=['GET'])
 def auth_check():
     """Check if current session is valid"""
@@ -642,7 +648,8 @@ def auth_check():
         ldap_enabled = settings.get('ldap_enabled', False)
         oidc_enabled = settings.get('oidc_enabled', False)
         oidc_button_text = settings.get('oidc_button_text', 'Sign in with Microsoft')
-        return jsonify({'authenticated': False, 'ldap_enabled': ldap_enabled, 'oidc_enabled': oidc_enabled, 'oidc_button_text': oidc_button_text}), 401
+        login_background = settings.get('login_background', '')
+        return jsonify({'authenticated': False, 'ldap_enabled': ldap_enabled, 'oidc_enabled': oidc_enabled, 'oidc_button_text': oidc_button_text, 'login_background': login_background}), 401
     
     # Get user info - always fresh from database
     users_db = load_users()
@@ -746,7 +753,8 @@ def auth_check():
             'language': user.get('language', ''),
             'ui_layout': user.get('ui_layout', 'modern'),
             'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Feb 2026
-            'totp_enabled': user.get('totp_enabled', False)
+            'totp_enabled': user.get('totp_enabled', False),
+            'layout_chosen': user.get('layout_chosen', False)
         },
         'password_expiry': password_expiry,
         'requires_2fa_setup': requires_2fa_setup,
@@ -818,79 +826,93 @@ def get_cluster_creds_internal(cluster_id):
     
     # Get node IPs - the cluster_host is our reliable fallback
     node_ips = {}
-    cluster_host = mgr.current_host or mgr.config.host
-    
+    cluster_host = mgr.host
+
     logging.info(f"[CLUSTER-CREDS] Getting node IPs for cluster {cluster_id}, host={cluster_host}")
-    
-    try:
-        host = cluster_host
-        
-        # Method 1: Get from Proxmox cluster status API (has IPs for clustered nodes)
-        status_url = f"https://{host}:8006/api2/json/cluster/status"
-        r = mgr._create_session().get(status_url, timeout=10)
-        
-        if r.status_code == 200:
-            status_data = r.json().get('data', [])
-            logging.info(f"[CLUSTER-CREDS] Cluster status returned {len(status_data)} items")
-            for item in status_data:
-                if item.get('type') == 'node':
-                    node_name = item.get('name', '')
-                    node_ip = item.get('ip')
-                    logging.info(f"[CLUSTER-CREDS] Cluster status node: {node_name}, ip={node_ip}")
-                    if node_name and node_ip:
-                        # Store with original case and lowercase for matching
-                        node_ips[node_name] = node_ip
-                        node_ips[node_name.lower()] = node_ip
-        
-        # Method 2: Get all nodes and ensure they have IPs
-        resources = mgr.get_cluster_resources()
-        if resources.get('success'):
-            for node in resources.get('nodes', []):
-                node_name = node.get('node', '')
-                node_lower = node_name.lower()
-                
-                # Already have IP?
-                if node_lower in [k.lower() for k in node_ips.keys() if node_ips.get(k)]:
-                    continue
-                    
-                logging.info(f"[CLUSTER-CREDS] Node {node_name} needs IP lookup")
-                
-                # Try network config API
-                try:
-                    net_url = f"https://{host}:8006/api2/json/nodes/{node_name}/network"
-                    r = mgr._create_session().get(net_url, timeout=5)
-                    if r.status_code == 200:
-                        for iface in r.json().get('data', []):
-                            # Look for interface with IP
-                            iface_type = iface.get('type', '')
-                            addr = iface.get('address', '')
-                            cidr = iface.get('cidr', '')
-                            
-                            # Extract IP from CIDR if no address
-                            if not addr and cidr:
-                                addr = cidr.split('/')[0]
-                            
-                            if addr and iface_type in ['bridge', 'eth', 'bond', 'OVSBridge', 'vlan']:
-                                node_ips[node_name] = addr
-                                node_ips[node_lower] = addr
-                                logging.info(f"[CLUSTER-CREDS] Node {node_name} IP from network: {addr}")
-                                break
-                except Exception as e:
-                    logging.warning(f"[CLUSTER-CREDS] Network API failed for {node_name}: {e}")
-                
-                # Fallback: use cluster host (the host we connect to Proxmox API through)
-                if node_name not in node_ips:
-                    node_ips[node_name] = cluster_host
-                    node_ips[node_lower] = cluster_host
-                    logging.info(f"[CLUSTER-CREDS] Node {node_name} using cluster host: {cluster_host}")
-                        
-    except Exception as e:
-        logging.error(f"[CLUSTER-CREDS] Error getting node IPs: {e}")
-    
-    # Final fallback: if no nodes found, use cluster host
-    if not node_ips:
-        node_ips['_default'] = cluster_host
-        logging.info(f"[CLUSTER-CREDS] No nodes found, using default: {cluster_host}")
+
+    # NS Mar 2026: XCP-ng path - get IPs from XAPI host records
+    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
+        try:
+            nodes = mgr.get_nodes() or []
+            for n in nodes:
+                nname = n.get('node', '')
+                if nname:
+                    ip = mgr._get_host_ip(nname)
+                    node_ips[nname] = ip
+                    node_ips[nname.lower()] = ip
+                    logging.info(f"[CLUSTER-CREDS] XCP-ng node {nname} ip={ip}")
+        except Exception as e:
+            logging.error(f"[CLUSTER-CREDS] XCP-ng node IP lookup: {e}")
+        if not node_ips:
+            node_ips['_default'] = cluster_host
+    else:
+        try:
+            host = cluster_host
+
+            # Method 1: Get from Proxmox cluster status API (has IPs for clustered nodes)
+            status_url = f"https://{host}:8006/api2/json/cluster/status"
+            r = mgr._create_session().get(status_url, timeout=10)
+
+            if r.status_code == 200:
+                status_data = r.json().get('data', [])
+                logging.info(f"[CLUSTER-CREDS] Cluster status returned {len(status_data)} items")
+                for item in status_data:
+                    if item.get('type') == 'node':
+                        node_name = item.get('name', '')
+                        node_ip = item.get('ip')
+                        logging.info(f"[CLUSTER-CREDS] Cluster status node: {node_name}, ip={node_ip}")
+                        if node_name and node_ip:
+                            # Store with original case and lowercase for matching
+                            node_ips[node_name] = node_ip
+                            node_ips[node_name.lower()] = node_ip
+
+            # Method 2: Get all nodes and ensure they have IPs
+            resources = mgr.get_cluster_resources()
+            if resources.get('success'):
+                for node in resources.get('nodes', []):
+                    node_name = node.get('node', '')
+                    node_lower = node_name.lower()
+
+                    # Already have IP?
+                    if node_lower in [k.lower() for k in node_ips.keys() if node_ips.get(k)]:
+                        continue
+
+                    logging.info(f"[CLUSTER-CREDS] Node {node_name} needs IP lookup")
+
+                    # Try network config API
+                    try:
+                        net_url = f"https://{host}:8006/api2/json/nodes/{node_name}/network"
+                        r = mgr._create_session().get(net_url, timeout=5)
+                        if r.status_code == 200:
+                            for iface in r.json().get('data', []):
+                                iface_type = iface.get('type', '')
+                                addr = iface.get('address', '')
+                                cidr = iface.get('cidr', '')
+
+                                if not addr and cidr:
+                                    addr = cidr.split('/')[0]
+
+                                if addr and iface_type in ['bridge', 'eth', 'bond', 'OVSBridge', 'vlan']:
+                                    node_ips[node_name] = addr
+                                    node_ips[node_lower] = addr
+                                    logging.info(f"[CLUSTER-CREDS] Node {node_name} IP from network: {addr}")
+                                    break
+                    except Exception as e:
+                        logging.warning(f"[CLUSTER-CREDS] Network API failed for {node_name}: {e}")
+
+                    # Fallback: use cluster host
+                    if node_name not in node_ips:
+                        node_ips[node_name] = cluster_host
+                        node_ips[node_lower] = cluster_host
+                        logging.info(f"[CLUSTER-CREDS] Node {node_name} using cluster host: {cluster_host}")
+
+        except Exception as e:
+            logging.error(f"[CLUSTER-CREDS] Error getting node IPs: {e}")
+
+        # Final fallback: if no nodes found, use cluster host
+        if not node_ips:
+            node_ips['_default'] = cluster_host
+            logging.info(f"[CLUSTER-CREDS] No nodes found, using default: {cluster_host}")
     
     # NS Feb 2026: Never expose Proxmox password via API - shell proxy handles auth server-side
     return jsonify({
@@ -951,11 +973,15 @@ def auth_change_password():
     user['password_hash'] = password_hash
     user['password_changed_at'] = datetime.now().isoformat()  # LW: reset expiry timer
     
+    # Clear forced password change flag (#144)
+    if user.get('force_password_change'):
+        user['force_password_change'] = False
+
     # Mark admin initialized if this is the default admin
     if user.get('is_default'):
         user['is_default'] = False
         mark_admin_initialized()
-    
+
     save_users(users_db)
     
     # Invalidate all other sessions for this user (keep current session)

@@ -59,7 +59,7 @@ def save_alerts_config(config):
         # Convert alerts list to dict format for database
         alerts_dict = {}
         for alert in config.get('alerts', []):
-            alert_id = alert.get('id', str(uuid.uuid4())[:8])
+            alert_id = alert.get('id', str(uuid.uuid4()))
             alerts_dict[alert_id] = alert
         
         db.save_all_alerts(alerts_dict)

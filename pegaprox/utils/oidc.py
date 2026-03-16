@@ -306,7 +306,7 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
         return claims
     except Exception as e:
         logging.error(f"[OIDC] JWT decode error: {e}")
-        return {'error': str(e)}
+        return {'error': 'Failed to validate identity token'}
 
 
 def oidc_get_user_info(config: dict, access_token: str) -> dict:

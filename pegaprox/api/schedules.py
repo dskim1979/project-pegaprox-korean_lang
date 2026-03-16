@@ -241,7 +241,7 @@ def execute_scheduled_action(action):
             return
         
         node = vm.get('node')
-        host = mgr.current_host or mgr.config.host
+        host = mgr.host
         
         # Build the API URL based on action
         if action_type == 'start':

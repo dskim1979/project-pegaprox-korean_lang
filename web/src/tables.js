@@ -513,16 +513,16 @@
                         
                         {expanded && (
                             <div className="space-y-3 pt-2 border-t border-gray-700/50 animate-fade-in">
-                                {/* Disk Usage */}
-                                <div className="flex items-center justify-between text-xs">
+                                {/* Disk Usage - hidden for XCP-ng (no dom0 disk stats) */}
+                                {metrics.disk_percent != null && <><div className="flex items-center justify-between text-xs">
                                     <span className="text-gray-500 flex items-center gap-2">
                                         <Icons.HardDrive /> {t('disk')}
                                     </span>
                                     <div className="flex items-center gap-2">
                                         <div className="w-16 h-1.5 bg-proxmox-dark rounded-full overflow-hidden">
-                                            <div 
+                                            <div
                                                 className={`h-full rounded-full ${
-                                                    metrics.disk_percent > 90 ? 'bg-red-500' : 
+                                                    metrics.disk_percent > 90 ? 'bg-red-500' :
                                                     metrics.disk_percent > 75 ? 'bg-yellow-500' : 'bg-green-500'
                                                 }`}
                                                 style={{ width: `${metrics.disk_percent || 0}%` }}
@@ -538,7 +538,7 @@
                                     <span className="text-gray-300 font-mono">
                                         {formatBytes(metrics.disk_used || 0)} / {formatBytes(metrics.disk_total || 0)}
                                     </span>
-                                </div>
+                                </div></>}
                                 
                                 {/* Network */}
                                 <div className="flex items-center justify-between text-xs">
@@ -599,10 +599,10 @@
                                     </div>
                                 )}
                                 
-                                {/* PVE Version */}
+                                {/* Hypervisor Version */}
                                 {metrics.pveversion && (
                                     <div className="flex items-center justify-between text-xs">
-                                        <span className="text-gray-500">PVE</span>
+                                        <span className="text-gray-500">{metrics.pveversion.startsWith('XCP') ? 'XCP-ng' : 'PVE'}</span>
                                         <span className="text-gray-400 font-mono text-[10px]">
                                             {metrics.pveversion}
                                         </span>
@@ -865,6 +865,7 @@
         }
 
         // LW: Feb 2026 - compact node row for corporate overview
+        // NS: Mar 2026 - added sparkline history + detail cards
         function NodeCompactRow({ name, metrics, clusterId, onOpenNodeConfig, onMaintenanceToggle, onStartUpdate, onNodeAction, onRemoveNode, onMoveNode }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -875,6 +876,21 @@
             const [showUpdateConfirm, setShowUpdateConfirm] = useState(false);
             const [updateWithReboot, setUpdateWithReboot] = useState(true);
             const [actionLoading, setActionLoading] = useState(null);
+            // sparkline history buffer - 20 pts like NodeCard
+            const histRef = useRef({ cpu: Array(20).fill(0), mem: Array(20).fill(0) });
+            const lastValRef = useRef(null);
+            const [, bump] = useState(0);
+
+            useEffect(() => {
+                if (metrics && metrics !== lastValRef.current) {
+                    lastValRef.current = metrics;
+                    histRef.current = {
+                        cpu: [...histRef.current.cpu.slice(1), metrics.cpu_percent || 0],
+                        mem: [...histRef.current.mem.slice(1), metrics.mem_percent || (metrics.memory ? (metrics.memory.used / metrics.memory.total) * 100 : 0)]
+                    };
+                    bump(n => n + 1);
+                }
+            }, [metrics?.cpu_percent, metrics?.mem_percent]);
 
             const isOffline = !metrics || metrics.status === 'offline';
             const cpuPercent = metrics?.cpu_percent?.toFixed(1) || (metrics?.cpu ? (metrics.cpu * 100).toFixed(1) : '0');
@@ -883,7 +899,7 @@
             const maintenanceTask = metrics?.maintenance_task;
             const isUpdating = metrics?.is_updating;
             const updateTask = metrics?.update_task;
-            const canUpdate = isInMaintenance && maintenanceTask?.status && ['completed', 'completed_with_errors'].includes(maintenanceTask.status) && !isUpdating;
+            const canUpdate = isInMaintenance && maintenanceTask?.status && (['completed', 'completed_with_errors'].includes(maintenanceTask.status) || metrics?.maintenance_acknowledged) && !isUpdating;
 
             const formatBytes = (bytes) => { const gb = bytes / 1073741824; return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1048576).toFixed(1)} MB`; };
             const formatUptime = (uptime) => {
@@ -900,8 +916,9 @@
             const statusDotStyle = isOffline ? {background: '#f54f47'} : isInMaintenance ? {background: '#efc006'} : isUpdating ? {background: '#49afd9'} : {background: '#60b515'};
             const statusLabel = isOffline ? '' : isInMaintenance ? t('maintenance') : isUpdating ? (updateTask?.phase || t('updating')) : '';
 
+            const nodeStatusCls = isOffline ? 'node-offline' : isInMaintenance ? 'node-maintenance' : 'node-online';
             return (
-                <div className="corp-node-row">
+                <div className={`corp-node-row ${nodeStatusCls}`}>
                     {/* Main Row */}
                     <div className={`flex items-center gap-3 px-3 py-2 text-[13px] cursor-pointer ${isOffline ? 'opacity-50' : ''}`} onClick={() => !isOffline && setExpanded(!expanded)}>
                         {!isOffline && <Icons.ChevronRight className={`w-3 h-3 flex-shrink-0`} style={{color: '#728b9a', transform: expanded ? 'rotate(90deg)' : 'none'}} />}
@@ -911,15 +928,17 @@
                             <>
                                 {statusLabel && <span className={`corp-badge ${isInMaintenance ? 'corp-badge-locked' : 'corp-badge-ha'}`}>{statusLabel}</span>}
                                 <span className="w-8" style={{color: '#728b9a'}}>CPU</span>
-                                <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: '#1b2a32', borderRadius: '1px'}}>
+                                <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
                                     <div className="h-full" style={{width: `${Math.min(cpuPercent, 100)}%`, background: '#49afd9', borderRadius: '1px'}}></div>
                                 </div>
                                 <span className="w-12 text-right" style={{color: '#adbbc4'}}>{cpuPercent}%</span>
+                                {(() => { const d = histRef.current.cpu; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#49afd9" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#49afd9" /></svg>; })()}
                                 <span className="w-8 ml-2" style={{color: '#728b9a'}}>RAM</span>
-                                <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: '#1b2a32', borderRadius: '1px'}}>
+                                <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
                                     <div className="h-full" style={{width: `${Math.min(ramPercent, 100)}%`, background: '#9b59b6', borderRadius: '1px'}}></div>
                                 </div>
                                 <span className="w-12 text-right" style={{color: '#adbbc4'}}>{ramPercent}%</span>
+                                {(() => { const d = histRef.current.mem; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#9b59b6" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#9b59b6" /></svg>; })()}
                                 {metrics.score != null && <span className="ml-3 w-16" style={{color: '#728b9a'}}>{t('score')}: <span style={{color: '#adbbc4'}}>{metrics.score}</span></span>}
                                 <span className="ml-3" style={{color: '#728b9a'}}>{formatUptime(metrics.uptime)}</span>
                                 <span className="flex-1"></span>
@@ -937,7 +956,7 @@
 
                     {/* Expanded Detail Panel */}
                     {expanded && !isOffline && metrics && (
-                        <div className="px-3 pb-3 pt-1 ml-5" style={{borderTop: '1px solid #37474f'}}>
+                        <div className="px-3 pb-3 pt-1 ml-5" style={{borderTop: '1px solid var(--corp-divider)'}}>
                             {/* Update Banner */}
                             {isUpdating && updateTask && (
                                 <div className="mb-2 p-2 text-[12px]" style={{
@@ -989,7 +1008,7 @@
                                         </div>
                                         {(maintenanceTask.status === 'running' || maintenanceTask.status === 'evacuating') && maintenanceTask.total_vms > 0 && (
                                             <div className="flex items-center gap-2">
-                                                <div className="w-16 h-1 overflow-hidden" style={{background: '#1b2a32', borderRadius: '1px'}}>
+                                                <div className="w-16 h-1 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
                                                     <div className="h-full" style={{width: `${(((maintenanceTask.migrated_count || maintenanceTask.migrated_vms || 0)) / maintenanceTask.total_vms) * 100}%`, background: '#efc006', borderRadius: '1px'}}></div>
                                                 </div>
                                                 <span style={{color: '#efc006'}}>{maintenanceTask.migrated_count || maintenanceTask.migrated_vms || 0}/{maintenanceTask.total_vms}</span>
@@ -1001,7 +1020,8 @@
                                             {t('failedToMigrate')}: {maintenanceTask.failed_vms.map(v => v.name || v.vmid).join(', ')}
                                         </div>
                                     )}
-                                    {maintenanceTask.status === 'completed_with_errors' && !metrics.maintenance_acknowledged && (
+                                    {/* NS: force/exit buttons - only when NOT yet acknowledged */}
+                                    {!metrics.maintenance_acknowledged && (maintenanceTask.status === 'completed_with_errors' || (maintenanceTask.failed_vms && maintenanceTask.failed_vms.length > 0)) && (
                                         <div className="mt-1.5 flex items-center gap-2">
                                             <button onClick={(e) => { e.stopPropagation();
                                                 if (confirm(t('forceMaintenanceWarning') || 'Proceeding may stop remaining VMs. Continue?')) {
@@ -1016,25 +1036,45 @@
                                             </button>
                                         </div>
                                     )}
+                                    {/* after acknowledge: show warning + unlocked actions like modern */}
+                                    {metrics.maintenance_acknowledged && maintenanceTask.failed_vms && maintenanceTask.failed_vms.length > 0 && (
+                                        <div className="mt-1.5 text-[11px]" style={{color: '#efc006'}}>
+                                            <Icons.AlertTriangle className="w-2.5 h-2.5 inline mr-1" />
+                                            {maintenanceTask.failed_vms.length} {t('vmsWillBeStopped') || 'VM(s) will be stopped during reboot'}
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1 text-[12px] mb-2">
-                                <div><span style={{color: '#728b9a'}}>{t('disk')}: </span><span style={{color: '#adbbc4'}}>{metrics.disk_percent?.toFixed(1) || '-'}%</span>
-                                    {metrics.disk_total && <span style={{color: '#728b9a'}}> ({formatBytes(metrics.disk_used || 0)} / {formatBytes(metrics.disk_total)})</span>}
+                            {/* NS Mar 2026 - property cards instead of flat text grid */}
+                            <div className="corp-node-detail-grid">
+                                <div className="corp-node-detail-card">
+                                    <div className="corp-node-detail-label">{t('disk')}</div>
+                                    <div className="corp-node-detail-value">{metrics.disk_percent?.toFixed(1) || '-'}%</div>
+                                    <div className="corp-node-detail-sub">{metrics.disk_total ? `${formatBytes(metrics.disk_used || 0)} / ${formatBytes(metrics.disk_total)}` : '-'}</div>
                                 </div>
-                                <div><span style={{color: '#728b9a'}}>Load: </span><span style={{color: '#adbbc4'}}>{
-                                    Array.isArray(metrics.loadavg) ? metrics.loadavg.map(l => typeof l === 'number' ? l.toFixed(2) : l).join(' / ') :
-                                    typeof metrics.loadavg === 'number' ? metrics.loadavg.toFixed(2) : (metrics.loadavg || '-')
-                                }</span></div>
-                                <div><span style={{color: '#728b9a'}}>{t('cpuCores')}: </span><span style={{color: '#adbbc4'}}>{metrics.cpus || metrics.cpu_count || (metrics.cpuinfo ? `${metrics.cpuinfo.cores || metrics.cpuinfo.cpus || '-'} × ${metrics.cpuinfo.sockets || 1}` : '-')}</span></div>
-                                <div><span style={{color: '#728b9a'}}>{t('uptime')}: </span><span style={{color: '#adbbc4'}}>{formatUptime(metrics.uptime)}</span></div>
-                                {(metrics.kernel_version || metrics.kversion) && <div><span style={{color: '#728b9a'}}>{t('kernel') || 'Kernel'}: </span><span style={{color: '#adbbc4'}}>{metrics.kernel_version || (metrics.kversion ? metrics.kversion.split(' ')[0] : '')}</span></div>}
-                                {(metrics.pve_version || metrics.pveversion) && <div><span style={{color: '#728b9a'}}>PVE: </span><span style={{color: '#adbbc4'}}>{metrics.pve_version || metrics.pveversion}</span></div>}
+                                <div className="corp-node-detail-card">
+                                    <div className="corp-node-detail-label">Load</div>
+                                    <div className="corp-node-detail-value">{
+                                        Array.isArray(metrics.loadavg) ? metrics.loadavg.map(l => typeof l === 'number' ? l.toFixed(2) : l).join(' / ') :
+                                        typeof metrics.loadavg === 'number' ? metrics.loadavg.toFixed(2) : (metrics.loadavg || '-')
+                                    }</div>
+                                    <div className="corp-node-detail-sub">{t('cpuCores')}: {metrics.cpus || metrics.cpu_count || (metrics.cpuinfo ? `${metrics.cpuinfo.cores || metrics.cpuinfo.cpus || '-'} × ${metrics.cpuinfo.sockets || 1}` : '-')}</div>
+                                </div>
+                                <div className="corp-node-detail-card">
+                                    <div className="corp-node-detail-label">{t('uptime')}</div>
+                                    <div className="corp-node-detail-value">{formatUptime(metrics.uptime)}</div>
+                                    <div className="corp-node-detail-sub">{(metrics.kernel_version || metrics.kversion) ? (metrics.kernel_version || metrics.kversion.split(' ')[0]) : ''}</div>
+                                </div>
+                                <div className="corp-node-detail-card">
+                                    <div className="corp-node-detail-label">{(metrics.pveversion || '').startsWith('XCP') ? 'XCP-ng' : 'PVE'}</div>
+                                    <div className="corp-node-detail-value" style={{fontSize: 13}}>{metrics.pve_version || metrics.pveversion || '-'}</div>
+                                    <div className="corp-node-detail-sub">{metrics.kernel_version || (metrics.kversion ? metrics.kversion.split(' ')[0] : '')}</div>
+                                </div>
                             </div>
 
                             {/* Action Buttons */}
-                            <div className="corp-toolbar flex flex-wrap items-center gap-1 pt-1" style={{borderTop: '1px solid #37474f'}}>
+                            <div className="corp-toolbar flex flex-wrap items-center gap-1 pt-1" style={{borderTop: '1px solid var(--corp-divider)'}}>
                                 {!isInMaintenance ? (
                                     <button onClick={() => setShowMaintenanceConfirm(true)}>
                                         <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} /> {t('enterMaintenance') || t('maintenance')}
@@ -1049,7 +1089,7 @@
                                                 <Icons.Download className="w-3 h-3" style={{color: '#49afd9'}} /> {t('startUpdate')}
                                             </button>
                                         )}
-                                        {maintenanceTask?.status && ['completed', 'completed_with_errors'].includes(maintenanceTask.status) && (
+                                        {maintenanceTask?.status && (['completed', 'completed_with_errors'].includes(maintenanceTask.status) || metrics?.maintenance_acknowledged) && (
                                             <>
                                                 {onRemoveNode && <button onClick={() => onRemoveNode(name)}><Icons.Trash className="w-3 h-3" style={{color: '#f54f47'}} /> {t('removeNodeFromCluster')}</button>}
                                                 {onMoveNode && <button onClick={() => onMoveNode(name)}><Icons.ArrowRight className="w-3 h-3" /> {t('moveNodeToCluster')}</button>}
@@ -1128,9 +1168,23 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // FIXME: rerenders too often, useMemo wuold help probably
-        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed }) {
+        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate }) {
             const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - corporate defaults to table view
+            // NS Mar 2026 - per-VM sparkline history for table view
+            const vmHistRef = useRef({});
+            useEffect(() => {
+                if (!resources || !isCorporate) return;
+                const buf = vmHistRef.current;
+                resources.forEach(r => {
+                    if (r.status !== 'running') return;
+                    const id = r.vmid;
+                    if (!buf[id]) buf[id] = { cpu: Array(15).fill(0), mem: Array(15).fill(0) };
+                    buf[id].cpu = [...buf[id].cpu.slice(1), r.cpu_percent || 0];
+                    buf[id].mem = [...buf[id].mem.slice(1), r.mem_percent || 0];
+                });
+            }, [resources]);
             const [search, setSearch] = useState('');
             const [filter, setFilter] = useState('all');
             const [sortBy, setSortBy] = useState('vmid');
@@ -1222,6 +1276,10 @@
             const [openDropdown, setOpenDropdown] = useState(null); // action dropdown menu
             const prevResources = useRef(resources);  // for comparison, not really used
 
+            // NS: #127 - lazy-load IPs from guest agent for running qemu VMs
+            const ipCache = useRef({});
+            const [ipTick, setIpTick] = useState(0);
+
             const filterLabels = {
                 all: t('all'),
                 running: t('active'),
@@ -1288,6 +1346,28 @@
                 return filteredResources.slice(startIndex, startIndex + itemsPerPage);
             }, [filteredResources, effectivePage, itemsPerPage]);
 
+            // fetch IPs for visible running qemu VMs - #127
+            useEffect(() => {
+                if (!paginatedResources?.length) return;
+                const toFetch = paginatedResources.filter(r =>
+                    r.type === 'qemu' && r.status === 'running' && !ipCache.current[r.vmid]
+                );
+                if (!toFetch.length) return;
+                toFetch.forEach(vm => {
+                    ipCache.current[vm.vmid] = 'loading';
+                    const cid = vm._clusterId || clusterId;
+                    fetch(`/api/clusters/${cid}/vms/${vm.node}/qemu/${vm.vmid}/guest-info`, {
+                        credentials: 'include', headers: getAuthHeaders()
+                    })
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => {
+                        ipCache.current[vm.vmid] = data?.ip_addresses?.length ? data.ip_addresses[0] : null;
+                        setIpTick(t => t + 1);
+                    })
+                    .catch(() => { ipCache.current[vm.vmid] = null; });
+                });
+            }, [paginatedResources]);
+
             const handleSort = (col) => {
                 if (sortBy === col) {
                     setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -1353,7 +1433,7 @@
                                     value={search}
                                     onChange={(e) => setSearch(e.target.value)}
                                     className="pl-7 pr-3 py-1 text-[13px] bg-transparent border text-white placeholder-gray-600 focus:outline-none w-56"
-                                    style={{borderColor: '#485764', borderRadius: '2px'}}
+                                    style={{borderColor: 'var(--corp-border-medium)', borderRadius: '2px'}}
                                 />
                             </div>
                             <span className="corp-toolbar-divider" />
@@ -1389,21 +1469,36 @@
                                 <Icons.Search />
                             </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className={`flex items-center gap-2 ${isCorporate ? 'corp-toolbar-filter-group' : ''}`}>
                             {['all', 'running', 'stopped', 'vm', 'lxc'].map(f => (
                                 <button
                                     key={f}
                                     onClick={() => setFilter(f)}
-                                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
-                                        filter === f
-                                            ? 'bg-proxmox-orange text-white'
-                                            : 'bg-proxmox-dark text-gray-400 hover:text-white border border-proxmox-border'
-                                    }`}
+                                    className={isCorporate
+                                        ? `corp-toolbar-filter ${filter === f ? 'active' : ''}`
+                                        : `px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
+                                            filter === f
+                                                ? 'bg-proxmox-orange text-white'
+                                                : 'bg-proxmox-dark text-gray-400 hover:text-white border border-proxmox-border'
+                                        }`}
                                 >
                                     {filterLabels[f]}
                                 </button>
                             ))}
                         </div>
+                        {isCorporate ? (
+                        <div className="corp-toolbar-group">
+                            <button onClick={() => setViewMode('cards')} className={`p-1.5 ${viewMode === 'cards' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-dark text-gray-400 hover:text-white'}`} title={t('gridView')}>
+                                <Icons.Grid />
+                            </button>
+                            <button onClick={() => setViewMode('table')} className={`p-1.5 ${viewMode === 'table' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-dark text-gray-400 hover:text-white'}`} title={t('listView')}>
+                                <Icons.List />
+                            </button>
+                            <button onClick={() => setViewMode('detail')} className={`p-1.5 ${viewMode === 'detail' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-dark text-gray-400 hover:text-white'}`} title={t('compactView')}>
+                                <Icons.Eye />
+                            </button>
+                        </div>
+                        ) : (
                         <div className="flex items-center gap-1 p-1 bg-proxmox-dark rounded-lg border border-proxmox-border">
                             <button
                                 onClick={() => setViewMode('cards')}
@@ -1427,6 +1522,7 @@
                                 <Icons.Eye />
                             </button>
                         </div>
+                        )}
                     </div>
                     )}
 
@@ -1486,7 +1582,7 @@
                                                     {resource.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
                                                 </div>
                                                 <div>
-                                                    <div className="font-medium text-white truncate max-w-[150px]">
+                                                    <div className={`font-medium truncate max-w-[150px] ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined}>
                                                         {resource.name || `${resource.type === 'qemu' ? 'VM' : 'CT'} ${resource.vmid}`}
                                                     </div>
                                                     <div className="text-xs text-gray-500">ID: {resource.vmid}</div>
@@ -1523,7 +1619,7 @@
                                             {/* VM Tags */}
                                             {resource.tags && (
                                                 <div className="flex flex-wrap gap-1">
-                                                    {resource.tags.split(';').filter(t => t.trim()).map((tag, i) => (
+                                                    {(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).map((tag, i) => (
                                                         <span key={i} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange">
                                                             {tag.trim()}
                                                         </span>
@@ -1555,7 +1651,7 @@
                                                     </span>
                                                 </div>
                                                 <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
-                                                    <div 
+                                                    <div
                                                         className="h-full rounded-full transition-all"
                                                         style={{
                                                             width: `${Math.min(resource.cpu_percent || 0, 100)}%`,
@@ -1564,8 +1660,29 @@
                                                     />
                                                 </div>
                                             </div>
+                                            {resource.maxdisk > 0 && (
+                                            <div>
+                                                <div className="flex items-center justify-between text-xs mb-1">
+                                                    <span className="text-gray-500">{t('disk')}</span>
+                                                    <span className="text-gray-400 font-mono">
+                                                        {resource.disk > 0 ? `${formatBytes(resource.disk)} / ${formatBytes(resource.maxdisk)}` : formatBytes(resource.maxdisk)}
+                                                    </span>
+                                                </div>
+                                                {resource.disk > 0 && (
+                                                <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
+                                                    <div
+                                                        className="h-full rounded-full transition-all"
+                                                        style={{
+                                                            width: `${resource.disk_percent || 0}%`,
+                                                            background: (resource.disk_percent || 0) < 75 ? '#22c55e' : (resource.disk_percent || 0) < 90 ? '#eab308' : '#ef4444'
+                                                        }}
+                                                    />
+                                                </div>
+                                                )}
+                                            </div>
+                                            )}
                                         </div>
-                                        
+
                                         {/* Card Actions */}
                                         <div className="flex items-center justify-between p-3 border-t border-proxmox-border bg-proxmox-dark/30">
                                             {/* Primary Actions - Always visible */}
@@ -1714,9 +1831,9 @@
                     {/* LW: Feb 2026 - table view, corporate data-grid */}
                     {viewMode === 'table' && (
                         <div className={isCorporate ? 'overflow-hidden border border-proxmox-border' : 'overflow-hidden rounded-xl border border-proxmox-border'}>
-                            <table className={`w-full ${isCorporate ? 'corp-datagrid' : ''}`}>
+                            <table className={`w-full ${isCorporate ? 'corp-datagrid corp-datagrid-striped' : ''}`}>
                                 <thead>
-                                    <tr className={isCorporate ? 'text-left' : 'bg-proxmox-dark text-left'} style={isCorporate ? {background: '#22343c'} : undefined}>
+                                    <tr className={isCorporate ? 'text-left' : 'bg-proxmox-dark text-left'} style={isCorporate ? {background: 'var(--corp-header-bg)'} : undefined}>
                                         <th className={isCorporate ? 'px-2 py-1.5 w-8' : 'px-4 py-3 w-10'}>
                                             <input
                                                 type="checkbox"
@@ -1730,24 +1847,34 @@
                                             { key: 'name', label: t('name') },
                                             { key: 'type', label: t('type') },
                                             { key: 'node', label: 'Node' },
+                                            { key: 'ip', label: 'IP', noSort: true },
                                             { key: 'cpu_percent', label: 'CPU' },
                                             { key: 'mem', label: 'RAM' },
+                                            { key: 'disk', label: t('disk') },
                                             { key: 'status', label: 'Status' },
                                             { key: 'actions', label: t('actions') },
                                         ].map(col => (
                                             <th
                                                 key={col.key}
-                                                onClick={() => col.key !== 'actions' && handleSort(col.key)}
+                                                onClick={() => col.key !== 'actions' && !col.noSort && handleSort(col.key)}
                                                 className={isCorporate
-                                                    ? `text-xs font-semibold uppercase tracking-wider ${col.key !== 'actions' ? 'cursor-pointer hover:text-white' : ''}`
-                                                    : `px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider ${col.key !== 'actions' ? 'cursor-pointer hover:text-white' : ''} transition-colors`
+                                                    ? `text-xs font-semibold uppercase tracking-wider ${col.key !== 'actions' && !col.noSort ? 'cursor-pointer hover:text-white' : ''}`
+                                                    : `px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider ${col.key !== 'actions' && !col.noSort ? 'cursor-pointer hover:text-white' : ''} transition-colors`
                                                 }
                                                 style={isCorporate ? {color: '#adbbc4', padding: '6px 8px', fontSize: '12px'} : undefined}
                                             >
                                                 <div className="flex items-center gap-1">
                                                     {col.label}
-                                                    {sortBy === col.key && (
-                                                        <span className={isCorporate ? 'sort-indicator' : 'text-proxmox-orange'} style={isCorporate ? {color: '#49afd9'} : undefined}>{sortDir === 'asc' ? '↑' : '↓'}</span>
+                                                    {isCorporate ? (
+                                                        sortBy === col.key ? (
+                                                            <svg className="corp-sort-icon" viewBox="0 0 8 8"><path d={sortDir === 'asc' ? 'M4 1L7 6H1z' : 'M4 7L1 2h6z'} /></svg>
+                                                        ) : col.key !== 'actions' && !col.noSort ? (
+                                                            <svg className="corp-sort-icon corp-sort-hint" viewBox="0 0 8 8"><path d="M4 1L7 6H1z" /></svg>
+                                                        ) : null
+                                                    ) : (
+                                                        sortBy === col.key && (
+                                                            <span className="text-proxmox-orange">{sortDir === 'asc' ? '↑' : '↓'}</span>
+                                                        )
                                                     )}
                                                 </div>
                                             </th>
@@ -1757,7 +1884,7 @@
                                 <tbody className={isCorporate ? '' : 'divide-y divide-proxmox-border'}>
                                     {paginatedResources.length === 0 ? (
                                         <tr>
-                                            <td colSpan={9} className={isCorporate ? 'px-2 py-4 text-center text-gray-500' : 'px-4 py-8 text-center text-gray-500'}>
+                                            <td colSpan={10} className={isCorporate ? 'px-2 py-4 text-center text-gray-500' : 'px-4 py-8 text-center text-gray-500'}>
                                                 {t('noResults')}
                                             </td>
                                         </tr>
@@ -1785,17 +1912,17 @@
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div>
-                                                        <span className="font-medium text-white">{resource.name || '-'}</span>
+                                                        <span className={`font-medium ${onVmNavigate ? 'text-blue-400 hover:text-blue-300 hover:underline cursor-pointer' : 'text-white'}`} onClick={onVmNavigate ? (e) => { e.stopPropagation(); onVmNavigate(resource); } : undefined}>{resource.name || '-'}</span>
                                                         {resource.tags && (
                                                             <div className="flex flex-wrap gap-1 mt-1">
-                                                                {resource.tags.split(';').filter(t => t.trim()).slice(0, 3).map((tag, i) => (
+                                                                {(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).slice(0, 3).map((tag, i) => (
                                                                     <span key={i} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange">
                                                                         {tag.trim()}
                                                                     </span>
                                                                 ))}
-                                                                {resource.tags.split(';').filter(t => t.trim()).length > 3 && (
+                                                                {(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).length > 3 && (
                                                                     <span className="px-1.5 py-0.5 text-xs rounded bg-gray-500/20 text-gray-400">
-                                                                        +{resource.tags.split(';').filter(t => t.trim()).length - 3}
+                                                                        +{(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).length - 3}
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -1816,6 +1943,9 @@
                                                     <span className="text-sm text-gray-300">{resource.node}</span>
                                                 </td>
                                                 <td className="px-4 py-3">
+                                                    <span className="text-xs font-mono text-gray-400">{ipCache.current[resource.vmid] && ipCache.current[resource.vmid] !== 'loading' ? ipCache.current[resource.vmid] : '-'}</span>
+                                                </td>
+                                                <td className="px-4 py-3">
                                                     <div className="flex items-center gap-2">
                                                         <div className="flex-1 max-w-[60px]">
                                                             <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
@@ -1828,6 +1958,13 @@
                                                             </div>
                                                         </div>
                                                         <span className="text-xs text-gray-400 font-mono">{(resource.cpu_percent || 0).toFixed(0)}%</span>
+                                                        {isCorporate && resource.status === 'running' && (() => {
+                                                            const h = (vmHistRef.current[resource.vmid] || {}).cpu;
+                                                            if (!h || h.length < 2) return null;
+                                                            const mx = Math.max(...h, 1);
+                                                            const pts = h.map((v,i) => `${(i/14)*30},${10-((v/mx)*10)}`).join(' ');
+                                                            return <svg width="30" height="10" className="corp-vm-sparkline"><polyline fill="none" stroke="#49afd9" strokeWidth="1" points={pts} /></svg>;
+                                                        })()}
                                                     </div>
                                                 </td>
                                                 <td className="px-4 py-3">
@@ -1846,6 +1983,33 @@
                                                         <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
                                                             {formatBytes(resource.mem)} / {formatBytes(resource.maxmem)}
                                                         </span>
+                                                        {isCorporate && resource.status === 'running' && (() => {
+                                                            const h = (vmHistRef.current[resource.vmid] || {}).mem;
+                                                            if (!h || h.length < 2) return null;
+                                                            const mx = Math.max(...h, 1);
+                                                            const pts = h.map((v,i) => `${(i/14)*30},${10-((v/mx)*10)}`).join(' ');
+                                                            return <svg width="30" height="10" className="corp-vm-sparkline"><polyline fill="none" stroke="#9b59b6" strokeWidth="1" points={pts} /></svg>;
+                                                        })()}
+                                                    </div>
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                    <div className="flex items-center gap-2">
+                                                        {resource.disk > 0 && (
+                                                        <div className="flex-1 max-w-[60px]">
+                                                            <div className="h-1.5 rounded-full bg-proxmox-border overflow-hidden">
+                                                                <div
+                                                                    className="h-full rounded-full transition-all"
+                                                                    style={{
+                                                                        width: `${resource.disk_percent || 0}%`,
+                                                                        background: (resource.disk_percent || 0) < 75 ? '#22c55e' : (resource.disk_percent || 0) < 90 ? '#eab308' : '#ef4444'
+                                                                    }}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                        )}
+                                                        <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
+                                                            {resource.disk > 0 ? `${formatBytes(resource.disk)} / ${formatBytes(resource.maxdisk || 0)}` : formatBytes(resource.maxdisk || 0)}
+                                                        </span>
                                                     </div>
                                                 </td>
                                                 <td className="px-4 py-3">
@@ -1863,6 +2027,39 @@
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3">
+                                                    {isCorporate ? (
+                                                    <div className="flex items-center gap-0">
+                                                        {/* power group */}
+                                                        <div className="corp-action-group">
+                                                            {resource.status === 'stopped' ? (
+                                                                <button onClick={() => handleAction(resource, 'start')} disabled={actionLoading[`${resource.vmid}-start`]} className="corp-action-btn" title={t('start')}>
+                                                                    {actionLoading[`${resource.vmid}-start`] ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.PlayCircle className="w-3.5 h-3.5" />}
+                                                                </button>
+                                                            ) : (
+                                                                <>
+                                                                    <button onClick={() => handleAction(resource, 'shutdown')} disabled={actionLoading[`${resource.vmid}-shutdown`]} className="corp-action-btn" title={t('shutdown')}>
+                                                                        {actionLoading[`${resource.vmid}-shutdown`] ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Power className="w-3.5 h-3.5" />}
+                                                                    </button>
+                                                                    <button onClick={() => handleAction(resource, 'reboot')} disabled={actionLoading[`${resource.vmid}-reboot`]} className="corp-action-btn" title={t('reboot')}>
+                                                                        {actionLoading[`${resource.vmid}-reboot`] ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.RefreshCw className="w-3.5 h-3.5" />}
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                        <span className="corp-toolbar-divider" style={{margin: '0 3px'}} />
+                                                        {/* management group */}
+                                                        <div className="corp-action-group">
+                                                            {resource.status === 'running' && (
+                                                                <button onClick={() => onOpenConsole(resource)} className="corp-action-btn" title={t('openConsole')}><Icons.Monitor className="w-3.5 h-3.5" /></button>
+                                                            )}
+                                                            <button onClick={() => onOpenConfig(resource)} className="corp-action-btn" title={t('configuration')}><Icons.Cog className="w-3.5 h-3.5" /></button>
+                                                            <button onClick={() => setShowMigrateModal(resource)} className="corp-action-btn" title={t('migrate')}><Icons.ArrowRight className="w-3.5 h-3.5" /></button>
+                                                            <button onClick={() => setShowCloneModal(resource)} className="corp-action-btn" title={t('clone')}><Icons.Copy className="w-3.5 h-3.5" /></button>
+                                                        </div>
+                                                        <span className="corp-toolbar-divider" style={{margin: '0 3px'}} />
+                                                        <button onClick={() => setShowDeleteConfirm(resource)} className="corp-action-btn danger" title={t('delete')}><Icons.Trash className="w-3.5 h-3.5" /></button>
+                                                    </div>
+                                                    ) : (
                                                     <div className="flex items-center gap-1">
                                                         <button
                                                             onClick={() => onOpenConfig(resource)}
@@ -1945,7 +2142,6 @@
                                                                 >
                                                                     {actionLoading[`${resource.vmid}-reboot`] ? <Icons.RotateCw /> : <Icons.RefreshCw />}
                                                                 </button>
-                                                                {/* Force Reset - QEMU only */}
                                                                 {resource.type === 'qemu' && (
                                                                     <button
                                                                         onClick={() => handleAction(resource, 'reset')}
@@ -1973,6 +2169,7 @@
                                                             <Icons.Trash />
                                                         </button>
                                                     </div>
+                                                    )}
                                                 </td>
                                             </tr>
                                         ))
@@ -2011,14 +2208,14 @@
                                                 <div className="text-xs text-gray-500">ID: {resource.vmid} · {resource.node}</div>
                                                 {resource.tags && (
                                                     <div className="flex flex-wrap gap-1 mt-1">
-                                                        {resource.tags.split(';').filter(t => t.trim()).slice(0, 2).map((tag, i) => (
+                                                        {(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).slice(0, 2).map((tag, i) => (
                                                             <span key={i} className="px-1 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange">
                                                                 {tag.trim()}
                                                             </span>
                                                         ))}
-                                                        {resource.tags.split(';').filter(t => t.trim()).length > 2 && (
+                                                        {(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).length > 2 && (
                                                             <span className="px-1 py-0.5 text-xs rounded bg-gray-500/20 text-gray-400">
-                                                                +{resource.tags.split(';').filter(t => t.trim()).length - 2}
+                                                                +{(Array.isArray(resource.tags) ? resource.tags : resource.tags.split(';')).filter(t => t.trim()).length - 2}
                                                             </span>
                                                         )}
                                                     </div>

@@ -69,7 +69,7 @@ def save_scheduled_tasks(config):
         cursor.execute('DELETE FROM scheduled_tasks')
         
         for task in config.get('tasks', []):
-            task_id = task.get('id', str(uuid.uuid4())[:8])
+            task_id = task.get('id', str(uuid.uuid4()))
             cursor.execute('''
                 INSERT INTO scheduled_tasks
                 (id, cluster_id, name, task_type, schedule, config, 

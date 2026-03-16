@@ -7,7 +7,7 @@
         // LW: Keep this simple - first thing users see!
         function LoginScreen() {
             const { t } = useTranslation();
-            const { login, error, ldapEnabled, oidcEnabled, oidcButtonText } = useAuth();
+            const { login, error, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground } = useAuth();
             const [username, setUsername] = useState('');
             const [password, setPassword] = useState('');
             const [totpCode, setTotpCode] = useState('');
@@ -55,8 +55,12 @@
                 try {
                     const res = await fetch(`${API_URL}/auth/oidc/authorize`, { credentials: 'include' });
                     const data = await res.json();
-                    if (data.auth_url) {
+                    if (data.auth_url && data.auth_url.startsWith('https://')) {
                         window.location.href = data.auth_url;
+                    } else if (data.auth_url) {
+                        // NS: Mar 2026 - block non-https redirects (open redirect prevention)
+                        console.error('OIDC auth_url must use https');
+                        setOidcError('Insecure authentication URL rejected');
                     } else {
                         setOidcError(data.error || 'Failed to get authorization URL');
                         setOidcLoading(false);
@@ -82,8 +86,17 @@
             };
             
             return(
-                <div className="min-h-screen bg-proxmox-darker flex items-center justify-center p-4">
-                    <div className="w-full max-w-md">
+                <div className="min-h-screen bg-proxmox-darker flex items-center justify-center p-4 relative"
+                    style={loginBackground ? {
+                        backgroundImage: `url(${loginBackground})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                        backgroundRepeat: 'no-repeat'
+                    } : undefined}>
+                    {loginBackground && (
+                        <div className="absolute inset-0 bg-black/50" />
+                    )}
+                    <div className="w-full max-w-md relative z-10">
                         {/* Logo and Title */}
                         <div className="text-center mb-8">
                             <img 

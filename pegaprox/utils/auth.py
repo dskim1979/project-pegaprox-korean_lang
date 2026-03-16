@@ -45,7 +45,7 @@ def get_session_timeout():
         from pegaprox.api.helpers import load_server_settings
         settings = load_server_settings()
         return settings.get('session_timeout', SESSION_TIMEOUT)
-    except:
+    except Exception:
         return SESSION_TIMEOUT
 
 # Argon2 support
@@ -381,15 +381,15 @@ def _load_sessions_legacy():
             decrypted = fernet.decrypt(encrypted)
             active_sessions = json.loads(decrypted.decode('utf-8'))
             logging.info(f"Loaded {len(active_sessions)} sessions from legacy encrypted file")
-        except:
-            pass
+        except Exception as e:
+            logging.debug(f"Could not load legacy encrypted sessions: {e}")
     elif os.path.exists(SESSIONS_FILE):
         try:
             with open(SESSIONS_FILE, 'r') as f:
                 active_sessions = json.load(f)
             logging.info(f"Loaded {len(active_sessions)} sessions from legacy JSON file")
-        except:
-            pass
+        except Exception as e:
+            logging.debug(f"Could not load legacy sessions file: {e}")
 
 def create_session(username: str, role: str) -> str:
     """Create a new session for a user

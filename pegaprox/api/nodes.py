@@ -55,55 +55,64 @@ def get_node_ip_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    cluster_host = mgr.current_host or mgr.config.host
+    cluster_host = mgr.host
     node_ip = None
     source = None
-    
-    try:
-        host = cluster_host
-        
-        # Method 1: Cluster status API (has IPs for clustered nodes)
-        status_url = f"https://{host}:8006/api2/json/cluster/status"
-        r = mgr._create_session().get(status_url, timeout=10)
-        
-        if r.status_code == 200:
-            for item in r.json().get('data', []):
-                if item.get('type') == 'node':
-                    item_name = item.get('name', '')
-                    if item_name.lower() == node.lower() and item.get('ip'):
-                        node_ip = item.get('ip')
-                        source = 'cluster_status'
-                        break
-        
-        # Method 2: Network configuration API
-        if not node_ip:
-            net_url = f"https://{host}:8006/api2/json/nodes/{node}/network"
-            r = mgr._create_session().get(net_url, timeout=5)
-            if r.status_code == 200:
-                for iface in r.json().get('data', []):
-                    iface_type = iface.get('type', '')
-                    addr = iface.get('address', '')
-                    cidr = iface.get('cidr', '')
-                    
-                    if not addr and cidr:
-                        addr = cidr.split('/')[0]
-                    
-                    # Look for bridge or main interface with IP
-                    if addr and iface_type in ['bridge', 'eth', 'bond', 'OVSBridge', 'vlan']:
-                        node_ip = addr
-                        source = f'network_{iface.get("iface", "unknown")}'
-                        break
-        
-        # Method 3: Fallback to cluster host
-        if not node_ip:
+
+    # NS Mar 2026: XCP-ng uses XAPI host.get_address instead of Proxmox REST
+    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
+        try:
+            node_ip = mgr._get_host_ip(node)
+            source = 'xapi_host_address'
+        except Exception as e:
+            logging.error(f"XCP-ng get_node_ip: {e}")
             node_ip = cluster_host
-            source = 'cluster_host_fallback'
-            
-    except Exception as e:
-        logging.error(f"Error getting node IP: {e}")
-        node_ip = cluster_host
-        source = 'error_fallback'
-    
+            source = 'xcpng_fallback'
+    else:
+        try:
+            host = cluster_host
+
+            # Method 1: Cluster status API (has IPs for clustered nodes)
+            status_url = f"https://{host}:8006/api2/json/cluster/status"
+            r = mgr._create_session().get(status_url, timeout=10)
+
+            if r.status_code == 200:
+                for item in r.json().get('data', []):
+                    if item.get('type') == 'node':
+                        item_name = item.get('name', '')
+                        if item_name.lower() == node.lower() and item.get('ip'):
+                            node_ip = item.get('ip')
+                            source = 'cluster_status'
+                            break
+
+            # Method 2: Network configuration API
+            if not node_ip:
+                net_url = f"https://{host}:8006/api2/json/nodes/{node}/network"
+                r = mgr._create_session().get(net_url, timeout=5)
+                if r.status_code == 200:
+                    for iface in r.json().get('data', []):
+                        iface_type = iface.get('type', '')
+                        addr = iface.get('address', '')
+                        cidr = iface.get('cidr', '')
+
+                        if not addr and cidr:
+                            addr = cidr.split('/')[0]
+
+                        if addr and iface_type in ['bridge', 'eth', 'bond', 'OVSBridge', 'vlan']:
+                            node_ip = addr
+                            source = f'network_{iface.get("iface", "unknown")}'
+                            break
+
+            # Method 3: Fallback to cluster host
+            if not node_ip:
+                node_ip = cluster_host
+                source = 'cluster_host_fallback'
+
+        except Exception as e:
+            logging.error(f"Error getting node IP: {e}")
+            node_ip = cluster_host
+            source = 'error_fallback'
+
     return jsonify({
         'ip': node_ip,
         'node': node,
@@ -867,7 +876,7 @@ def get_smbios_autoconfig_status(cluster_id, node):
     try:
         # Get node IP and connect via SSH
         # For single-node, use cluster host; for multi-node, resolve from cluster status
-        node_ip = mgr.current_host or mgr.config.host
+        node_ip = mgr.host
         
         # Try to get actual node IP from cluster status
         try:
@@ -928,7 +937,7 @@ def deploy_smbios_autoconfig(cluster_id, node):
     
     try:
         # Get node IP
-        node_ip = mgr.current_host or mgr.config.host
+        node_ip = mgr.host
         try:
             status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
             r = mgr._create_session().get(status_url, timeout=10)
@@ -992,7 +1001,7 @@ def remove_smbios_autoconfig(cluster_id, node):
     
     try:
         # Get node IP
-        node_ip = mgr.current_host or mgr.config.host
+        node_ip = mgr.host
         try:
             status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
             r = mgr._create_session().get(status_url, timeout=10)
@@ -1055,7 +1064,7 @@ def control_smbios_autoconfig(cluster_id, node):
     
     try:
         # Get node IP
-        node_ip = mgr.current_host or mgr.config.host
+        node_ip = mgr.host
         try:
             status_url = f"https://{node_ip}:8006/api2/json/cluster/status"
             r = mgr._create_session().get(status_url, timeout=10)
@@ -1187,7 +1196,7 @@ def deploy_smbios_autoconfig_all(cluster_id):
     nodes = []
     node_ips = {}
     try:
-        cluster_host = mgr.current_host or mgr.config.host
+        cluster_host = mgr.host
         status_url = f"https://{cluster_host}:8006/api2/json/cluster/status"
         r = mgr._create_session().get(status_url, timeout=10)
         if r.status_code == 200:
@@ -1585,7 +1594,7 @@ def run_custom_script(cluster_id, script_id):
     node_ips = {}
     
     try:
-        cluster_host = mgr.current_host or mgr.config.host
+        cluster_host = mgr.host
         status_url = f"https://{cluster_host}:8006/api2/json/cluster/status"
         r = mgr._create_session().get(status_url, timeout=10)
         if r.status_code == 200:

@@ -121,3 +121,6 @@ _url_downloads = {}
 
 # V2P migrations
 _v2p_migrations = {}
+
+# Cross-hypervisor migrations (XHM) - NS Mar 2026
+_xhm_migrations = {}

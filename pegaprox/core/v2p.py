@@ -1267,7 +1267,7 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     from the management server to run the deployment commands on ESXi.
     """
     import uuid
-    key_id = str(uuid.uuid4())[:8]
+    key_id = str(uuid.uuid4())
     key_path = f"/tmp/v2p-key-{key_id}"
     
     # SSH options for key-based verification (after deployment)

@@ -56,7 +56,7 @@ def create_pool(cluster_id):
     
     try:
         # Create pool via Proxmox API
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/pools"
         
         api_data = {'poolid': poolid}
@@ -104,7 +104,7 @@ def update_pool(cluster_id, pool_id):
             return jsonify({'error': 'Failed to connect to Proxmox cluster'}), 503
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/pools/{pool_id}"
         response = manager._api_put(url, data={'comment': comment})
         
@@ -135,7 +135,7 @@ def delete_pool(cluster_id, pool_id):
             return jsonify({'error': 'Failed to connect to Proxmox cluster'}), 503
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/pools/{pool_id}"
         response = manager._api_delete(url)
         
@@ -199,7 +199,7 @@ def add_pool_member(cluster_id, pool_id):
     
     try:
         # Add VM to pool - Proxmox uses 'vms' parameter
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/pools/{pool_id}"
         
         logging.info(f"Adding VM {vmid} to pool {pool_id} on {host}")
@@ -250,7 +250,7 @@ def remove_pool_member(cluster_id, pool_id, vmid):
     
     try:
         # Remove VM from pool using DELETE parameter
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/pools/{pool_id}"
         response = manager._api_put(url, data={
             'vms': str(vmid),

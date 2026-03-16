@@ -189,6 +189,9 @@ class PegaProxManager:
         self._ip_cache = {}
         self._ip_cache_lock = threading.Lock()
         self._ip_refresh_thread = None
+        # disk usage from guest agent: (node, vmid) -> {used, total}
+        self._disk_cache = {}
+        self._disk_cache_lock = threading.Lock()
 
         # update tracking
         self.nodes_updating = {}
@@ -352,10 +355,24 @@ class PegaProxManager:
                 session.headers.update({'CSRFPreventionToken': self._csrf_token})
         return session
     
+    @staticmethod
+    def _bracket_ipv6(h):
+        """Wrap IPv6 addresses in brackets for URL construction (#145)"""
+        if h and ':' in h and not h.startswith('['):
+            return f'[{h}]'
+        return h
+
     @property
     def host(self) -> str:
+        """Host formatted for URL use — IPv6 gets brackets"""
+        h = self.current_host or self.config.host
+        return self._bracket_ipv6(h)
+
+    @property
+    def raw_host(self) -> str:
+        """Raw host/IP without brackets — for SSH, DNS lookups etc."""
         return self.current_host or self.config.host
-    
+
     @property
     def nodes(self) -> dict:
         """Return cached node status dict (node_name -> info). Lazy-populated with 30s TTL."""
@@ -474,8 +491,7 @@ class PegaProxManager:
     
     def api_request(self, method: str, endpoint: str, data: dict = None):
         """generic api request wrapper - NS Jan 2026"""
-        host = self.current_host or self.config.host
-        url = f'https://{host}:8006/api2/json{endpoint}'
+        url = f'https://{self.host}:8006/api2/json{endpoint}'
         
         try:
             if method.upper() == 'GET':
@@ -503,9 +519,12 @@ class PegaProxManager:
     def connect_to_proxmox(self) -> bool:
         # connect with fallback
         with self._connect_lock:
-            # NS: clear stale IPs so reconnect doesn't serve old data
+            # NS: clear stale IPs/disk so reconnect doesn't serve old data
             with self._ip_cache_lock:
                 self._ip_cache.clear()
+            with self._disk_cache_lock:
+                self._disk_cache.clear()
+
             # Build list of hosts to try: primary first, then fallbacks
             hosts_to_try = [self.config.host] + (self.config.fallback_hosts or [])
             
@@ -542,7 +561,7 @@ class PegaProxManager:
                         self._csrf_token = None
 
                         # Test the token by making a simple API call
-                        test_url = f"https://{host}:8006/api2/json/version"
+                        test_url = f"https://{self._bracket_ipv6(host)}:8006/api2/json/version"
                         headers = {'Authorization': f'PVEAPIToken={self._api_token}'}
                         resp = session.get(test_url, headers=headers, timeout=10)
 
@@ -581,7 +600,7 @@ class PegaProxManager:
                         }
                         # print(f"DEBUG: trying {host}")  # dont commit this
 
-                        login_url = f"https://{host}:8006/api2/json/access/ticket"
+                        login_url = f"https://{self._bracket_ipv6(host)}:8006/api2/json/access/ticket"
                         resp = session.post(login_url, data=login_data, timeout=10)
 
                         if resp.status_code == 200:
@@ -649,7 +668,7 @@ class PegaProxManager:
     def _auto_discover_fallback_hosts(self):
         # find other nodes in cluster
         try:
-            h = self.current_host or self.config.host
+            h = self.host
             url = f"https://{h}:8006/api2/json/nodes"
             r = self._create_session().get(url, timeout=10)
             
@@ -729,7 +748,7 @@ class PegaProxManager:
             self.logger.debug(f"API token creation failed (non-critical): {e}")
 
     def _get_api_url(self, path: str) -> str:
-        host = self.current_host or self.config.host
+        host = self.host
         return f"https://{host}:8006/api2/json{path}"
     
     def get_node_status(self) -> Dict[str, Any]:
@@ -760,7 +779,7 @@ class PegaProxManager:
             return {}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             response = self._api_get(url)
             
@@ -887,6 +906,10 @@ class PegaProxManager:
                         if is_updating:
                             update_task = self.nodes_updating[node_name].to_dict()
                         
+                        # NS: cpuinfo + versions for expanded node details
+                        cpuinfo = status_data.get('cpuinfo', {})
+                        loadavg = status_data.get('loadavg', [])
+
                         node_status[node_name] = {
                             'status': node.get('status', 'unknown'),
                             'cpu_percent': round(cpu_percent, 2),
@@ -900,6 +923,10 @@ class PegaProxManager:
                             'netout': netout,
                             'score': round(score, 2),
                             'uptime': status_data.get('uptime', 0),
+                            'loadavg': loadavg,
+                            'cpuinfo': cpuinfo,
+                            'pveversion': status_data.get('pveversion', ''),
+                            'kversion': status_data.get('kversion', ''),
                             'maintenance_mode': in_maintenance,
                             'maintenance_task': maintenance_task,
                             'maintenance_acknowledged': maintenance_acknowledged,
@@ -984,17 +1011,30 @@ class PegaProxManager:
                 maxmem = r.get('maxmem', 0)
                 r['mem_percent'] = round((r.get('mem', 0) / maxmem) * 100, 1) if maxmem > 0 else 0
                 r['cpu_percent'] = round(r.get('cpu', 0) * 100, 1)
+                maxdisk = r.get('maxdisk', 0)
+                r['disk_percent'] = round((r.get('disk', 0) / maxdisk) * 100, 1) if maxdisk > 0 else 0
 
-            # inject cached IP addresses (only for running VMs)
-            if self._ip_cache:
+            # inject cached IP addresses + disk usage (only for running VMs)
+            if self._ip_cache or self._disk_cache:
                 with self._ip_cache_lock:
                     for r in resources:
                         if r.get('status') != 'running':
                             continue
-                        ips = self._ip_cache.get((r.get('node', ''), r.get('vmid')))
+                        key = (r.get('node', ''), r.get('vmid'))
+                        ips = self._ip_cache.get(key)
                         if ips:
-                            r['ip'] = ips[0]           # primary IP for card display
-                            r['ip_addresses'] = ips    # full list for detail modal
+                            r['ip'] = ips[0]
+                            r['ip_addresses'] = ips
+                with self._disk_cache_lock:
+                    for r in resources:
+                        if r.get('status') != 'running':
+                            continue
+                        key = (r.get('node', ''), r.get('vmid'))
+                        disk_info = self._disk_cache.get(key)
+                        if disk_info:
+                            r['disk'] = disk_info['used']
+                            r['maxdisk'] = disk_info['total']
+                            r['disk_percent'] = round((disk_info['used'] / disk_info['total']) * 100, 1) if disk_info['total'] > 0 else 0
 
             return resources
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
@@ -1241,6 +1281,108 @@ class PegaProxManager:
                 }
 
         return {'violation': False}
+
+    def _enforce_affinity_rules(self, node_status):
+        """Proactively fix anti-affinity violations by migrating offending VMs.
+        NS: Mar 2026 - Issue #148 - anti-affinity rules weren't triggering migrations
+        because the balancer only checked affinity as a constraint, never proactively.
+        """
+        try:
+            rules = get_db().get_affinity_rules(self.id).get(self.id, [])
+        except Exception:
+            return 0
+
+        if not rules:
+            return 0
+
+        # build current vm->node + vm->resource maps
+        vms = self.get_vm_resources()
+        if not vms:
+            return 0
+
+        vm_nodes = {}
+        vm_lookup = {}
+        for res in vms:
+            if res.get('type') in ('qemu', 'lxc') and res.get('status') == 'running':
+                vid = str(res.get('vmid'))
+                vm_nodes[vid] = res.get('node')
+                vm_lookup[vid] = res
+
+        # get excluded nodes + maintenance
+        config_excluded = getattr(self.config, 'excluded_nodes', []) or []
+        available_nodes = [
+            n for n, d in node_status.items()
+            if d['status'] == 'online'
+            and not d.get('maintenance_mode', False)
+            and n not in config_excluded
+        ]
+
+        if len(available_nodes) < 2:
+            return 0
+
+        migrations = 0
+        balance_ct = getattr(self.config, 'balance_containers', False)
+
+        for rule in rules:
+            if not rule.get('enabled', True) or not rule.get('enforce', False):
+                continue
+            if rule.get('type') != 'separate':
+                continue
+
+            rule_vms = [str(v) for v in (rule.get('vm_ids') or rule.get('vms', []))]
+            # group VMs by which node they're on
+            node_groups = {}
+            for vid in rule_vms:
+                nd = vm_nodes.get(vid)
+                if nd:
+                    node_groups.setdefault(nd, []).append(vid)
+
+            # find nodes with >1 VM from the same anti-affinity rule
+            for nd, vids in node_groups.items():
+                if len(vids) < 2:
+                    continue
+
+                # need to move all but one off this node
+                to_move = vids[1:]  # keep the first, move the rest
+                for vid in to_move:
+                    vm_res = vm_lookup.get(vid)
+                    if not vm_res:
+                        continue
+
+                    # skip containers if balancing disabled for them
+                    if vm_res.get('type') == 'lxc' and not balance_ct:
+                        self.logger.info(f"[AFFINITY] Skipping CT {vid} - container balancing disabled")
+                        continue
+
+                    # find a target that doesn't already have a VM from this rule
+                    occupied = set(node_groups.keys())
+                    free_nodes = [n for n in available_nodes if n not in occupied and n != nd]
+
+                    if not free_nodes:
+                        # fallback: pick least-loaded node that isn't this one
+                        # even if it has another rule member (soft best-effort)
+                        self.logger.warning(f"[AFFINITY] No free node for {vid} (rule '{rule.get('name')}'), all available nodes occupied by rule members")
+                        continue
+
+                    # pick lowest-score node
+                    target = sorted(free_nodes, key=lambda n: node_status.get(n, {}).get('score', 999))[0]
+
+                    vm_type = 'CT' if vm_res.get('type') == 'lxc' else 'VM'
+                    self.logger.info(f"[AFFINITY] Enforcing anti-affinity rule '{rule.get('name')}': migrating {vm_type} {vid} ({vm_res.get('name', '')}) from {nd} → {target}")
+
+                    ok = self.migrate_vm(vm_res, target)
+                    if ok:
+                        migrations += 1
+                        # update maps so next iteration sees the new position
+                        vm_nodes[vid] = target
+                        node_groups.setdefault(target, []).append(vid)
+                        node_groups[nd].remove(vid)
+                    else:
+                        self.logger.warning(f"[AFFINITY] Migration failed for {vm_type} {vid}")
+
+        if migrations:
+            self.logger.info(f"[AFFINITY] Completed {migrations} affinity enforcement migration(s)")
+        return migrations
 
     def find_migration_candidate(self, source_node: str, target_node: str, exclude_vmids: list = None, include_containers: bool = None) -> Optional[Dict]:
         """
@@ -1515,7 +1657,7 @@ class PegaProxManager:
             result[node_name] = self._compute_predictive_score(node_name)
         return result
 
-    def migrate_vm(self, vm: Dict, target_node: str, dry_run: bool = None) -> bool:
+    def migrate_vm(self, vm: Dict, target_node: str, dry_run: bool = None, wait_timeout: int = 600) -> bool:
         """migrate vm to another node"""
         # NS: this handles the proxmox api call
         # MK: had to add iso unmount, was breaking migrations silently for weeks
@@ -1596,7 +1738,7 @@ class PegaProxManager:
                 
                 # Wait for migration to complete
                 if task_id:
-                    success = self._wait_for_task(source_node, task_id)
+                    success = self._wait_for_task(source_node, task_id, timeout=wait_timeout)
                     if success:
                         self.logger.info(f"[OK] Successfully migrated {vm.get('name', 'unnamed')} to {target_node}")
                         self.last_migration_log.append({
@@ -1731,15 +1873,32 @@ class PegaProxManager:
             self.logger.debug(f"[MAINT] Ceph flag set failed for {node_name}: {e}")
 
     def _unset_ceph_maintenance_flags(self, node_name):
-        """Remove ceph noout+norebalance after maintenance (#141)"""
+        """Remove ceph noout+norebalance after maintenance (#141)
+        NS Mar 2026: try target node first, fall back to any online node
+        (ceph commands are cluster-wide, same as ha-manager)"""
+        cmd_raw = "which ceph >/dev/null 2>&1 && ceph osd rm-noout " + node_name + " 2>&1 && ceph osd unset norebalance 2>&1 && echo CEPH_OK || echo CEPH_SKIP"
         try:
-            node_ip = self._get_node_ip(node_name)
-            if not node_ip:
-                return
-            cmd = "which ceph >/dev/null 2>&1 && ceph osd rm-noout " + node_name + " 2>&1 && ceph osd unset norebalance 2>&1 && echo CEPH_OK || echo CEPH_SKIP"
-            out = self._ssh_node_output(node_name, cmd, timeout=30)
+            # try target node
+            out = self._ssh_node_output(node_name, cmd_raw, timeout=30)
             if out and 'CEPH_OK' in out:
                 self.logger.info(f"[MAINT] Ceph flags cleared for {node_name}")
+                return
+            if out and 'CEPH_SKIP' in out:
+                return  # no ceph on this cluster
+
+            # target unreachable — try other online nodes
+            try:
+                node_status = self.get_node_status()
+                for nn, info in node_status.items():
+                    if nn == node_name:
+                        continue
+                    if info.get('status') == 'online' or not info.get('offline', True):
+                        out = self._ssh_node_output(nn, cmd_raw, timeout=30)
+                        if out and 'CEPH_OK' in out:
+                            self.logger.info(f"[MAINT] Ceph flags cleared for {node_name} (via {nn})")
+                            return
+            except:
+                pass
         except Exception as e:
             self.logger.debug(f"[MAINT] Ceph flag unset failed for {node_name}: {e}")
 
@@ -1752,7 +1911,7 @@ class PegaProxManager:
             native_ha_nodes.update(ha_nodes)
 
             # also check /nodes status
-            host = self.current_host or self.config.host
+            host = self.host
             resp = self._api_get(f"https://{host}:8006/api2/json/nodes")
             if resp and resp.status_code == 200:
                 for node in resp.json().get('data', []):
@@ -1790,7 +1949,7 @@ class PegaProxManager:
         #   id=manager_status with multi-line text "node1 master\nnode2 maintenance\n..."
         # We check both because single-node clusters only have manager_status
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             resp = self._api_get(f"https://{host}:8006/api2/json/cluster/ha/status/current")
             if resp.status_code != 200:
                 self.logger.debug(f"[MAINT] HA status endpoint returned {resp.status_code}")
@@ -1860,72 +2019,124 @@ class PegaProxManager:
         # move all VMs off this node
         try:
             task.status = 'evacuating'
-            
+
             # Get all VMs on this node
             vms = self.get_vm_resources()
             node_vms = [
-                vm for vm in vms 
-                if vm.get('node') == node_name and 
+                vm for vm in vms
+                if vm.get('node') == node_name and
                 vm.get('status') == 'running' and
                 vm.get('type') in ['qemu', 'lxc']
             ]
-            
+
             task.total_vms = len(node_vms)
             task.pending_vms = node_vms.copy()
-            
+
             if task.total_vms == 0:
                 self.logger.info(f"[OK] No running VMs on {node_name}, maintenance mode ready")
                 task.status = 'completed'
                 return
-            
+
             self.logger.info(f"[PKG] Found {task.total_vms} VMs to evacuate from {node_name}")
-            
+
             # Sort VMs by memory (smallest first for faster evacuation)
             node_vms.sort(key=lambda x: x.get('mem', 0))
-            
+
             for vm in node_vms:
                 vm_name = vm.get('name', 'unnamed')
                 vmid = vm.get('vmid')
-                
+
                 task.current_vm = {'vmid': vmid, 'name': vm_name}
-                
+
+                # NS: #78 — check if VM is still on this node before migrating.
+                # PVE HA might have already moved it while we were busy with other VMs
+                try:
+                    current_vms = self.get_vm_resources()
+                    still_here = any(
+                        v.get('vmid') == vmid and v.get('node') == node_name
+                        for v in current_vms
+                    )
+                    if not still_here:
+                        self.logger.info(f"[OK] {vm_name} ({vmid}) already migrated (HA or manual), skipping")
+                        task.migrated_vms += 1
+                        task.pending_vms = [v for v in task.pending_vms if v.get('vmid') != vmid]
+                        continue
+                except:
+                    pass  # if check fails, try migrating anyway
+
                 # Find best target node
                 target_node = self.get_best_target_node(exclude_nodes=[node_name])
-                
+
                 if not target_node:
                     self.logger.error(f"[ERROR] No available target node for {vm_name}")
                     task.failed_vms.append({'vmid': vmid, 'name': vm_name, 'error': 'No target node available'})
                     task.pending_vms = [v for v in task.pending_vms if v.get('vmid') != vmid]
                     continue
-                
+
                 self.logger.info(f"[SYNC] Evacuating {vm_name} (VMID: {vmid}) to {target_node}")
-                
-                # Perform migration (never dry run during evacuation)
-                success = self.migrate_vm(vm, target_node, dry_run=False)
-                
+
+                # MK: #78 — use longer timeout for evacuations. Local storage
+                # migrations with large disks can easily take 30+ min
+                success = self.migrate_vm(vm, target_node, dry_run=False, wait_timeout=1800)
+
                 if success:
                     task.migrated_vms += 1
                     self.logger.info(f"[OK] Evacuated {vm_name} to {target_node} ({task.migrated_vms}/{task.total_vms})")
                 else:
                     task.failed_vms.append({'vmid': vmid, 'name': vm_name, 'error': 'Migration failed'})
                     self.logger.error(f"[ERROR] Failed to evacuate {vm_name}")
-                
+
                 task.pending_vms = [v for v in task.pending_vms if v.get('vmid') != vmid]
-            
+
             task.current_vm = None
-            
+
+            # #78: verify node is actually empty — PVE HA or parallel migrations
+            # might still be running. Give them up to 5 min to finish.
+            remaining = self._count_vms_on_node(node_name)
+            if remaining != 0:  # -1 = API error, also warrants a recheck
+                if remaining > 0:
+                    self.logger.info(f"[MAINT] {remaining} VMs still on {node_name} after evacuation loop, waiting...")
+                else:
+                    self.logger.info(f"[MAINT] couldn't check VMs on {node_name}, retrying...")
+                waited = 0
+                while waited < 300:
+                    time.sleep(10)
+                    waited += 10
+                    remaining = self._count_vms_on_node(node_name)
+                    if remaining == 0:
+                        self.logger.info(f"[OK] All VMs cleared from {node_name} after {waited}s")
+                        break
+                    if remaining < 0:
+                        continue  # API error, just retry
+                    if waited % 60 == 0:
+                        self.logger.info(f"[MAINT] still {remaining} VMs on {node_name} ({waited}s)")
+                if remaining > 0:
+                    self.logger.warning(f"[WARN] {remaining} VMs still on {node_name} after post-evacuation wait")
+                elif remaining < 0:
+                    self.logger.warning(f"[WARN] could not verify VM count on {node_name} - API unreachable")
+
             if len(task.failed_vms) == 0:
                 task.status = 'completed'
                 self.logger.info(f"[OK] Maintenance mode ready for {node_name} - all VMs evacuated")
             else:
                 task.status = 'completed_with_errors'
                 self.logger.warning(f"[WARN] Maintenance mode for {node_name} completed with {len(task.failed_vms)} failed migrations")
-                
+
         except Exception as e:
             self.logger.error(f"[ERROR] Error during evacuation: {e}")
             task.status = 'failed'
             task.error = str(e)
     
+    def _count_vms_on_node(self, node_name):
+        """Quick check how many running VMs/CTs are still on a node"""
+        try:
+            vms = self.get_vm_resources()
+            return len([v for v in vms if v.get('node') == node_name
+                        and v.get('type') in ('qemu', 'lxc')
+                        and v.get('status') == 'running'])
+        except:
+            return -1
+
     def exit_maintenance_mode(self, node_name):
         native = False
         with self.maintenance_lock:
@@ -1943,32 +2154,57 @@ class PegaProxManager:
         return True
 
     # NS: reverse of _try_native_ha_maintenance
+    # #141 fix: ha-manager is a cluster command — if target node is offline,
+    # run it on any other reachable node instead
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
-            node_ip = self._get_node_ip(node_name)
-            if not node_ip:
-                self.logger.warning(f"[MAINT] can't resolve {node_name} to disable HA maint")
-                return
-
             ssh_user = (self.config.user or 'root').split('@')[0]
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
-
-            ok = False
             ssh_key = getattr(self.config, 'ssh_key', '')
-            if ssh_key:
-                ok = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key)
-            if not ok:
-                ok = self._ssh_run_command(node_ip, ssh_user, cmd)
-            if not ok and self.config.pass_:
-                ok = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, self.config.pass_)
 
-            if ok:
-                self.logger.info(f"[MAINT] disabled native HA maintenance for {node_name}")
-            else:
-                # MK: if SSH fails the user needs to do it manually
-                self.logger.error(f"[MAINT] couldn't disable HA maintenance for {node_name}")
-                self.logger.error(f"[MAINT] manual fix: sudo ha-manager crm-command node-maintenance disable {node_name}")
+            # build list of IPs to try: target node first, then other cluster nodes
+            candidate_ips = []
+            target_ip = self._get_node_ip(node_name)
+            if target_ip:
+                candidate_ips.append(target_ip)
+
+            # NS: gather other online nodes as fallback — the ha-manager command
+            # is cluster-wide so it works from any node
+            try:
+                node_status = self.get_node_status()
+                for nn, info in node_status.items():
+                    if nn == node_name:
+                        continue
+                    if info.get('status') == 'online' or not info.get('offline', True):
+                        other_ip = self._get_node_ip(nn)
+                        if other_ip and other_ip not in candidate_ips:
+                            candidate_ips.append(other_ip)
+            except:
+                pass
+
+            if not candidate_ips:
+                self.logger.error(f"[MAINT] no reachable nodes to disable HA maintenance for {node_name}")
+                return
+
+            for ip in candidate_ips:
+                ok = False
+                if ssh_key:
+                    ok = self._ssh_run_command_with_key(ip, ssh_user, cmd, ssh_key)
+                if not ok:
+                    ok = self._ssh_run_command(ip, ssh_user, cmd)
+                if not ok and self.config.pass_:
+                    ok = self._ssh_run_command_with_password(ip, ssh_user, cmd, self.config.pass_)
+
+                if ok:
+                    self.logger.info(f"[MAINT] disabled native HA maintenance for {node_name} (via {ip})")
+                    return
+                else:
+                    self.logger.debug(f"[MAINT] SSH to {ip} failed for HA disable, trying next...")
+
+            # MK: if all SSH attempts fail the user needs to do it manually
+            self.logger.error(f"[MAINT] couldn't disable HA maintenance for {node_name} via any node")
+            self.logger.error(f"[MAINT] manual fix: sudo ha-manager crm-command node-maintenance disable {node_name}")
         except Exception as e:
             self.logger.error(f"[MAINT] disable HA maint error {node_name}: {e}")
     
@@ -1994,7 +2230,7 @@ class PegaProxManager:
                 return
         
         try:
-            h = self.current_host or self.config.host
+            h = self.host
             url = f"https://{h}:8006/api2/json/nodes"
             r = self._create_session().get(url, timeout=10)
             
@@ -2034,7 +2270,7 @@ class PegaProxManager:
     def _ha_update_fallback_hosts(self):
         # update fallback hosts periodically
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             response = self._create_session().get(url, timeout=10)
             
@@ -2073,7 +2309,7 @@ class PegaProxManager:
         # Check cluster size and warn about 2-node clusters
         try:
             if self.is_connected or self.connect_to_proxmox():
-                host = self.current_host or self.config.host
+                host = self.host
                 url = f"https://{host}:8006/api2/json/nodes"
                 resp = self._create_session().get(url, timeout=10)
                 if resp.status_code == 200:
@@ -2198,7 +2434,7 @@ class PegaProxManager:
         
         try:
             # Use current connected host
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -2586,7 +2822,7 @@ class PegaProxManager:
         MK: checks proxmox 'shared' flag since LVM/ZFS can go either way
         """
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             # Get VM config
             if vm_type == 'qemu':
@@ -2764,7 +3000,7 @@ class PegaProxManager:
                     self.logger.error(f"[HA] Cannot connect to get VMs on {node}")
                     return []
             
-            h = self.current_host or self.config.host
+            h = self.host
             url = f"https://{h}:8006/api2/json/cluster/resources"
             r = self._create_session().get(url, params={'type': 'vm'}, timeout=10)
             
@@ -2783,7 +3019,7 @@ class PegaProxManager:
     
     def _ha_get_available_nodes(self, exclude_node: str = None) -> List[str]:
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             response = self._create_session().get(url, timeout=10)
             
@@ -2832,7 +3068,7 @@ class PegaProxManager:
         
         Without quorum, /etc/pve is read-only and nothing works!
         """
-        host = self.current_host or self.config.host
+        host = self.host
         
         try:
             # Force quorum first (for 2-node clusters)
@@ -3374,86 +3610,148 @@ class PegaProxManager:
     
     _SELF_FENCE_AGENT_SCRIPT = '''#!/bin/bash
 # PegaProx Self-Fence Agent
-# Simple logic: If I can't reach ANYONE, I'm isolated → stop my VMs
+# NS: split-brain prevention + auto-recovery of the PegaProx VM itself
 
 MANAGER_IP="__MANAGER_IP__"
 OTHER_NODES="__OTHER_NODES__"  # comma-separated list
+PEGAPROX_VMID="__PEGAPROX_VMID__"
 CHECK_INTERVAL=5
 FAIL_THRESHOLD=3
 FAIL_COUNT=0
+MGR_DOWN_COUNT=0
+MGR_RECOVERY_THRESHOLD=6  # 6 * 5s = 30s before trying restart
+RECOVERY_COOLDOWN=300      # 5 min between restart attempts
+RECOVERY_LOCKDIR="/tmp/.pegaprox-recovery.lock"
 
-log() { 
+log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a /var/log/pegaprox-agent.log
 }
 
-can_reach_anyone() {
-    # Try manager first
-    if ping -c1 -W2 $MANAGER_IP >/dev/null 2>&1; then
-        return 0
-    fi
-    
-    # Try other nodes
+can_reach_manager() {
+    ping -c1 -W2 $MANAGER_IP >/dev/null 2>&1
+}
+
+can_reach_other_nodes() {
+    [ -z "$OTHER_NODES" ] && return 1
     IFS=',' read -ra NODES <<< "$OTHER_NODES"
     for node_ip in "${NODES[@]}"; do
         if [ -n "$node_ip" ] && ping -c1 -W2 $node_ip >/dev/null 2>&1; then
             return 0
         fi
     done
-    
     return 1
 }
 
 stop_all_vms() {
     log "STOPPING ALL VMs AND CONTAINERS!"
-    
-    # Stop VMs
     for vmid in $(qm list 2>/dev/null | grep running | awk '{print $1}'); do
         log "Stopping VM $vmid"
         qm stop $vmid --timeout 30 2>/dev/null &
     done
-    
-    # Stop containers
     for ctid in $(pct list 2>/dev/null | grep running | awk '{print $1}'); do
         log "Stopping CT $ctid"
         pct stop $ctid --timeout 30 2>/dev/null &
     done
-    
     wait
     log "All VMs/CTs stopped"
 }
 
+# MK: try to bring back PegaProx when manager is down but cluster is healthy
+try_restart_pegaprox_vm() {
+    [ -z "$PEGAPROX_VMID" ] && return 1
+
+    # atomic lock via mkdir - only one node wins
+    if ! mkdir "$RECOVERY_LOCKDIR" 2>/dev/null; then
+        lock_age=$(( $(date +%s) - $(stat -c %Y "$RECOVERY_LOCKDIR" 2>/dev/null || echo 0) ))
+        if [ $lock_age -lt $RECOVERY_COOLDOWN ]; then
+            log "Recovery lock held (age ${lock_age}s < ${RECOVERY_COOLDOWN}s cooldown), skipping"
+            return 1
+        fi
+        rmdir "$RECOVERY_LOCKDIR" 2>/dev/null
+        mkdir "$RECOVERY_LOCKDIR" 2>/dev/null || return 1
+    fi
+
+    log "════════════════════════════════════════════════════════"
+    log "MANAGER DOWN - attempting PegaProx VM $PEGAPROX_VMID restart"
+    log "════════════════════════════════════════════════════════"
+
+    # check if we can see this VM at all
+    if ! qm status $PEGAPROX_VMID >/dev/null 2>&1; then
+        log "VM $PEGAPROX_VMID not accessible from this node"
+        rmdir "$RECOVERY_LOCKDIR" 2>/dev/null
+        return 1
+    fi
+
+    vm_status=$(qm status $PEGAPROX_VMID 2>/dev/null | awk '{print $2}')
+    log "VM $PEGAPROX_VMID current status: $vm_status"
+
+    if [ "$vm_status" != "running" ]; then
+        qm unlock $PEGAPROX_VMID 2>/dev/null
+        log "Starting VM $PEGAPROX_VMID..."
+        qm start $PEGAPROX_VMID 2>&1 | tee -a /var/log/pegaprox-agent.log
+
+        # give it time to boot
+        sleep 30
+        if can_reach_manager; then
+            log "PegaProx VM recovered successfully"
+        else
+            log "VM started but manager not yet reachable, might need more time"
+        fi
+    else
+        log "VM already running - manager might still be booting"
+    fi
+    return 0
+}
+
 log "PegaProx Self-Fence Agent starting"
-log "Manager: $MANAGER_IP"
-log "Other nodes: $OTHER_NODES"
-log "Threshold: $FAIL_THRESHOLD failures"
+log "Manager: $MANAGER_IP | Other nodes: $OTHER_NODES"
+log "PegaProx VMID: ${PEGAPROX_VMID:-not configured}"
+log "Thresholds: isolation=$FAIL_THRESHOLD, recovery=$MGR_RECOVERY_THRESHOLD"
 
 while true; do
-    if can_reach_anyone; then
-        if [ $FAIL_COUNT -gt 0 ]; then
-            log "Network recovered (was at $FAIL_COUNT failures)"
+    mgr_ok=0; nodes_ok=0
+    can_reach_manager && mgr_ok=1
+    can_reach_other_nodes && nodes_ok=1
+
+    if [ $mgr_ok -eq 1 ]; then
+        # everything fine
+        if [ $FAIL_COUNT -gt 0 ] || [ $MGR_DOWN_COUNT -gt 0 ]; then
+            log "Recovered (fail=$FAIL_COUNT mgr_down=$MGR_DOWN_COUNT)"
         fi
         FAIL_COUNT=0
+        MGR_DOWN_COUNT=0
+    elif [ $nodes_ok -eq 1 ]; then
+        # manager down but nodes reachable -> PegaProx probably crashed
+        ((MGR_DOWN_COUNT++))
+        FAIL_COUNT=0
+        log "Manager unreachable, other nodes OK ($MGR_DOWN_COUNT/$MGR_RECOVERY_THRESHOLD)"
+
+        if [ $MGR_DOWN_COUNT -ge $MGR_RECOVERY_THRESHOLD ]; then
+            try_restart_pegaprox_vm
+            MGR_DOWN_COUNT=0
+        fi
     else
+        # nobody reachable -> isolated
         ((FAIL_COUNT++))
-        log "WARNING: Cannot reach anyone! Failure count: $FAIL_COUNT/$FAIL_THRESHOLD"
-        
+        MGR_DOWN_COUNT=0
+        log "WARNING: Cannot reach anyone! $FAIL_COUNT/$FAIL_THRESHOLD"
+
         if [ $FAIL_COUNT -ge $FAIL_THRESHOLD ]; then
             log "════════════════════════════════════════════════════════"
-            log "ISOLATED! Cannot reach manager OR any other node!"
-            log "Self-fencing to prevent split-brain..."
+            log "ISOLATED! Self-fencing to prevent split-brain..."
             log "════════════════════════════════════════════════════════"
             stop_all_vms
-            
-            # Wait for network to recover before resuming checks
+
             log "Waiting for network recovery..."
-            while ! can_reach_anyone; do
+            while ! can_reach_manager && ! can_reach_other_nodes; do
                 sleep 10
             done
-            log "Network recovered! Resuming normal operation."
+            log "Network recovered, resuming."
             FAIL_COUNT=0
+            MGR_DOWN_COUNT=0
         fi
     fi
-    
+
     sleep $CHECK_INTERVAL
 done
 '''
@@ -3479,6 +3777,7 @@ done
             agent_script = self._SELF_FENCE_AGENT_SCRIPT
             agent_script = agent_script.replace('__MANAGER_IP__', manager_ip)
             agent_script = agent_script.replace('__OTHER_NODES__', other_nodes_str)
+            agent_script = agent_script.replace('__PEGAPROX_VMID__', str(self.ha_config.get('pegaprox_vmid', '')))
             
             # SSH credentials - try multiple sources
             ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
@@ -3556,7 +3855,7 @@ echo "AGENT_INSTALLED"
         
         # Try to get the IP we use to connect to the cluster
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             # Create a socket to the cluster to find our outgoing IP
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect((host, 8006))
@@ -3578,7 +3877,7 @@ echo "AGENT_INSTALLED"
         other_ips = []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -3611,7 +3910,7 @@ echo "AGENT_INSTALLED"
         results = {}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -3651,7 +3950,7 @@ echo "AGENT_INSTALLED"
         results = {}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -3732,7 +4031,7 @@ echo "AGENT_UNINSTALLED"
         Used when HA is disabled to prevent agents from running without manager
         """
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -3769,7 +4068,7 @@ echo "AGENT_UNINSTALLED"
         Used when HA is enabled and agents were previously installed
         """
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -3822,7 +4121,7 @@ echo "AGENT_UNINSTALLED"
         block_storages = []  # Track block-based storages for warning
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/storage"
             resp = self._create_session().get(url, timeout=10)
             
@@ -4123,7 +4422,7 @@ echo "AGENT_INSTALLED_OK"
         
         # Get all nodes
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes"
             resp = self._create_session().get(url, timeout=10)
             
@@ -4193,11 +4492,13 @@ echo "AGENT_INSTALLED_OK"
     
     def _ssh_run_command_output(self, host: str, user: str, command: str, timeout: int = 30) -> str:
         """Run SSH command and return output - HA PRIORITY (no rate limiting)
-        
+
         NS: Jan 2026 - HA status checks bypass semaphore for immediate execution
         """
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
         _ssh_track_connection('ha', +1)
-        
+
         try:
             ct = self.ha_config.get('ssh_connect_timeout', 10)
             result = subprocess.run(
@@ -4220,11 +4521,13 @@ echo "AGENT_INSTALLED_OK"
     
     def _ssh_run_command_with_key_output(self, host: str, user: str, command: str, key: str, timeout: int = 30) -> str:
         """Run SSH command with key and return output - HA PRIORITY (no rate limiting)
-        
+
         NS: Jan 2026 - HA operations bypass semaphore
         """
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
         _ssh_track_connection('ha', +1)
-        
+
         try:
             import tempfile
 
@@ -4257,11 +4560,13 @@ echo "AGENT_INSTALLED_OK"
     
     def _ssh_run_command_with_password_output(self, host: str, user: str, command: str, password: str, timeout: int = 30) -> str:
         """Run SSH command with password and return output - HA PRIORITY (no rate limiting)
-        
+
         NS: Jan 2026 - HA operations bypass semaphore
         """
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
         _ssh_track_connection('ha', +1)
-        
+
         try:
             env = os.environ.copy()
             env['SSHPASS'] = password
@@ -4816,7 +5121,7 @@ echo "AGENT_INSTALLED_OK"
         # Try to get from cluster status (Corosync ring addresses)
         # NOTE: These are often on a DIFFERENT VLAN (Corosync network), so put in other_ips
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/cluster/status"
             resp = self._create_session().get(url, timeout=10)
             if resp.status_code == 200:
@@ -4831,7 +5136,7 @@ echo "AGENT_INSTALLED_OK"
         
         # Try to get all network interfaces from node config
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node_name.lower()}/network"
             resp = self._create_session().get(url, timeout=10)
             if resp.status_code == 200:
@@ -4885,7 +5190,7 @@ echo "AGENT_INSTALLED_OK"
         result = {'has_active_locks': False, 'locked_vms': [], 'lock_age': None}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             # Get VMs on the node
             if vmids is None:
@@ -5032,7 +5337,7 @@ echo "AGENT_INSTALLED_OK"
                 vmid = vm.get('vmid')
                 
                 # Get VM config to find disk paths
-                host = self.current_host or self.config.host
+                host = self.host
                 url = f"https://{host}:8006/api2/json/nodes/{node_name}/qemu/{vmid}/config"
                 
                 resp = self._create_session().get(url, timeout=5)
@@ -5056,12 +5361,14 @@ echo "AGENT_INSTALLED_OK"
     
     def _ssh_run_command(self, host: str, user: str, command: str, key_file: str = None) -> bool:
         """Run SSH command on remote host - HA PRIORITY (no rate limiting)
-        
+
         NS: Jan 2026 - HA operations bypass the semaphore because:
         1. They are critical (fencing must happen immediately)
         2. They are short (< 5 seconds typically)
         3. They are rare (only during actual failures)
         """
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
         _ssh_track_connection('ha', +1)
         
         try:
@@ -5093,12 +5400,14 @@ echo "AGENT_INSTALLED_OK"
     
     def _ssh_run_command_with_key(self, host: str, user: str, command: str, key_content: str) -> bool:
         """Run SSH command using a private key from cluster config
-        
+
         MK: Security fix - writes key to temp file with strict permissions,
         uses it for SSH, then immediately deletes it.
         """
         import tempfile
-        
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
+
         if not key_content or not key_content.strip():
             return False
         
@@ -5143,14 +5452,16 @@ echo "AGENT_INSTALLED_OK"
     
     def _ssh_run_command_with_password(self, host: str, user: str, command: str, password: str) -> bool:
         """Run SSH command with password using sshpass - HA PRIORITY (no rate limiting)
-        
+
         MK: Security fix - use SSHPASS environment variable instead of
         command line argument. Command line args are visible in 'ps aux'!
-        
+
         NS: Jan 2026 - HA operations bypass semaphore for immediate execution
         """
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
         _ssh_track_connection('ha', +1)
-        
+
         try:
             # Check if sshpass is available
             which_result = subprocess.run(['which', 'sshpass'], capture_output=True)
@@ -5188,7 +5499,7 @@ echo "AGENT_INSTALLED_OK"
     
     def _ha_clear_vm_lock(self, vmid: int, vm_type: str, target_node: str, original_node: str) -> bool:
         """Clear VM/CT lock via Proxmox API. Returns True on success, False on failure."""
-        host = self.current_host or self.config.host
+        host = self.host
 
         try:
             if vm_type == 'qemu':
@@ -5246,7 +5557,7 @@ echo "AGENT_INSTALLED_OK"
             # Get target node IP
             target_ip = self._ha_get_node_ip(target_node)
             if not target_ip:
-                target_ip = self.current_host or self.config.host
+                target_ip = self.host
             
             # Use cluster credentials for SSH
             api_user = self.config.user
@@ -5292,7 +5603,7 @@ echo "AGENT_INSTALLED_OK"
         
         try:
             if self.is_connected:
-                host = self.current_host or self.config.host
+                host = self.host
                 url = f"https://{host}:8006/api2/json/nodes"
                 session = self._create_session()
                 response = session.get(url, timeout=5)
@@ -5359,6 +5670,7 @@ echo "AGENT_INSTALLED_OK"
                     'poison_pill_enabled': self.ha_config.get('poison_pill_enabled', True),
                     'strict_fencing': self.ha_config.get('strict_fencing', False),
                     'last_heartbeat_write': self.ha_last_heartbeat_write.isoformat() if self.ha_last_heartbeat_write else None,
+                    'pegaprox_vmid': self.ha_config.get('pegaprox_vmid', ''),
                 },
                 
                 # Cluster health summary
@@ -5387,7 +5699,7 @@ echo "AGENT_INSTALLED_OK"
         
         tasks = []
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             # Get cluster-wide tasks
             url = f"https://{host}:8006/api2/json/cluster/tasks"
@@ -5453,7 +5765,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/cluster/options"
             response = self._create_session().get(url, timeout=15)
             
@@ -5488,7 +5800,7 @@ echo "AGENT_INSTALLED_OK"
                 return False
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node}/tasks/{upid}"
             response = self._api_delete(url)
             
@@ -5509,7 +5821,7 @@ echo "AGENT_INSTALLED_OK"
                 return "Error: Not connected to Proxmox"
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node}/tasks/{upid}/log"
             params = {'limit': limit}
             response = self._create_session().get(url, params=params)
@@ -5539,7 +5851,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/cluster/ha/resources"
             response = self._api_get(url)
             
@@ -5557,7 +5869,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/cluster/ha/groups"
             response = self._api_get(url)
             
@@ -5577,7 +5889,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Not connected'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/cluster/ha/resources"
             
             # sid format: vm:100 or ct:100
@@ -5616,7 +5928,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Not connected'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             sid = f"{vm_type}:{vmid}"
             url = f"https://{host}:8006/api2/json/cluster/ha/resources/{sid}"
             
@@ -5660,7 +5972,7 @@ echo "AGENT_INSTALLED_OK"
                 if not self.connect_to_proxmox():
                     return None
             
-            host = self.current_host or self.config.host
+            host = self.host
             primary_ip = self.config.host
 
             # If target is the local/primary node, return its IP directly
@@ -5962,14 +6274,17 @@ echo "AGENT_INSTALLED_OK"
 
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0):
         """SSH connect with retry logic and connection rate limiting
-        
+
         NS: Jan 2026 - Limits concurrent CONNECTION ATTEMPTS (not active sessions).
         The semaphore is released after successful connection, allowing new
         connections while this one is active. This prevents connection storms
         while not blocking long-running operations.
-        
+
         HA operations use separate methods without any rate limiting.
         """
+        # strip URL brackets from IPv6 if someone passes host property
+        if host and host.startswith('[') and host.endswith(']'):
+            host = host[1:-1]
         paramiko = get_paramiko()
         if not paramiko:
             self.logger.error("paramiko not installed, cannot use SSH features")
@@ -6337,7 +6652,7 @@ echo "AGENT_INSTALLED_OK"
                     # Try via Proxmox API as fallback
                     try:
                         # Proxmox has a reboot command via API
-                        url = f"https://{self.config.host}:8006/api2/json/nodes/{node_name}/status"
+                        url = f"https://{self.host}:8006/api2/json/nodes/{node_name}/status"
                         response = self.session.post(url, data={'command': 'reboot'}, verify=False)
                         if response.status_code == 200:
                             task.add_output("Reboot initiated via Proxmox API")
@@ -6355,9 +6670,13 @@ echo "AGENT_INSTALLED_OK"
                 if self._wait_for_node_online(node_name):
                     task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
                 else:
-                    task.add_output(f"[WARN] Timeout waiting for / beim Warten auf {node_name}")
+                    task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
                     task.error = "Node did not come back online in time"
-            
+                    task.status = 'failed'
+                    task.phase = 'wait_timeout'
+                    task.completed_at = datetime.now()
+                    return
+
             # Done!
             task.status = 'completed'
             task.phase = 'done'
@@ -6416,7 +6735,7 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': 'Reset is not supported for LXC containers. Use reboot instead.'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             endpoint = 'qemu' if vm_type == 'qemu' else 'lxc'
             url = f"https://{host}:8006/api2/json/nodes/{node}/{endpoint}/{vmid}/status/{action}"
             
@@ -6580,7 +6899,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             if vm_type == 'qemu':
                 url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/remote_migrate"
             else:  # lxc
@@ -6662,7 +6981,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             user = self.config.user
             
             # Create token without privilege separation (privsep=0)
@@ -6704,7 +7023,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             user = self.config.user
             
             url = f"https://{host}:8006/api2/json/access/users/{user}/token/{token_name}"
@@ -7318,28 +7637,56 @@ echo "AGENT_INSTALLED_OK"
     # ==================== SNAPSHOT METHODS ====================
     
     def get_snapshots(self, node: str, vmid: int, vm_type: str) -> List[Dict]:
-        
+
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return []
-        
+
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             if vm_type == 'qemu':
                 url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/snapshot"
             else:
                 url = f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/snapshot"
-            
+
             response = self._api_get(url)
-            
+
             if response.status_code == 200:
                 snapshots = response.json()['data']
-                # Sort by snaptime, filter out 'current'
-                return sorted(
-                    [s for s in snapshots if s.get('name') != 'current'],
-                    key=lambda x: x.get('snaptime', 0),
-                    reverse=True
-                )
+                filtered = [s for s in snapshots if s.get('name') != 'current']
+
+                # NS: try to get disk sizes for snapshot volumes
+                try:
+                    conf_url = f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
+                    conf_resp = self._api_get(conf_url)
+                    if conf_resp.status_code == 200:
+                        conf = conf_resp.json().get('data', {})
+                        # sum up all disk sizes from VM config
+                        total_disk = 0
+                        for key, val in conf.items():
+                            if any(key.startswith(p) for p in ('scsi', 'virtio', 'sata', 'ide', 'mp', 'rootfs')):
+                                if isinstance(val, str) and 'size=' in val:
+                                    import re as _re
+                                    sz = _re.search(r'size=(\d+)([GMTK]?)', val)
+                                    if sz:
+                                        num = int(sz.group(1))
+                                        unit = sz.group(2)
+                                        if unit == 'T': num *= 1024 * 1024 * 1024 * 1024
+                                        elif unit == 'G' or not unit: num *= 1024 * 1024 * 1024
+                                        elif unit == 'M': num *= 1024 * 1024
+                                        elif unit == 'K': num *= 1024
+                                        total_disk += num
+                        # memory size for vmstate snapshots
+                        mem_bytes = int(conf.get('memory', 0)) * 1024 * 1024  # MB -> bytes
+                        for s in filtered:
+                            # disk size = total disk allocation (snapshot stores delta, but we show VM disk size)
+                            s['disk_size'] = total_disk
+                            if s.get('vmstate'):
+                                s['ram_size'] = mem_bytes
+                except Exception:
+                    pass
+
+                return sorted(filtered, key=lambda x: x.get('snaptime', 0), reverse=True)
             return []
         except Exception as e:
             self.logger.error(f"Error getting snapshots: {e}")
@@ -7352,7 +7699,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'can_snapshot': False, 'reason': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             # Get VM/CT config
             if vm_type == 'qemu':
@@ -7441,7 +7788,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             if vm_type == 'qemu':
                 url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/snapshot"
             else:
@@ -7560,7 +7907,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
 
         try:
-            host = self.current_host or self.config.host
+            host = self.host
 
             # Get VM config
             if vm_type == 'qemu':
@@ -7698,7 +8045,7 @@ echo "AGENT_INSTALLED_OK"
             # Check guest agent availability (QEMU only)
             if vm_type == 'qemu':
                 try:
-                    host = self.current_host or self.config.host
+                    host = self.host
                     config_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
                     resp = self._create_session().get(config_url, timeout=10)
                     if resp.status_code == 200:
@@ -7770,7 +8117,7 @@ echo "AGENT_INSTALLED_OK"
         fs_frozen = False
         if vm_type == 'qemu' and cap.get('has_guest_agent'):
             try:
-                host = self.current_host or self.config.host
+                host = self.host
                 freeze_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent/fsfreeze-freeze"
                 resp = self._create_session().post(freeze_url, timeout=30)
                 if resp.status_code == 200:
@@ -7819,7 +8166,7 @@ echo "AGENT_INSTALLED_OK"
             # Always thaw if we froze
             if fs_frozen:
                 try:
-                    host = self.current_host or self.config.host
+                    host = self.host
                     thaw_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent/fsfreeze-thaw"
                     self._create_session().post(thaw_url, timeout=30)
                     self.logger.info(f"FS thawed for {vm_type}/{vmid}")
@@ -8027,7 +8374,7 @@ echo "AGENT_INSTALLED_OK"
 
         # Check VM is stopped
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             if vm_type == 'qemu':
                 status_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/status/current"
             else:
@@ -8201,7 +8548,7 @@ echo "AGENT_INSTALLED_OK"
         
         try:
             # Use the cluster host - Proxmox API will route to correct node
-            host = self.current_host or self.config.host
+            host = self.host
             
             # Build URL based on VM type
             if vm_type == 'qemu':
@@ -8279,9 +8626,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': error_msg}
                 
         except Exception as e:
-            self.logger.error(f"[ERROR] Shell ticket error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.exception(f"[ERROR] Shell ticket error: {e}")
             return {'success': False, 'error': str(e)}
     
     def get_spice_ticket(self, node: str, vmid: int, vm_type: str) -> Dict[str, Any]:
@@ -8370,7 +8715,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             # First get current config to see lock reason
             if vm_type == 'qemu':
@@ -8417,7 +8762,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             if vm_type == 'qemu':
                 config_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -8453,7 +8798,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             if vm_type == 'qemu':
                 url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/rrddata"
@@ -8963,7 +9308,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node}/storage"
             response = self._api_get(url)
             
@@ -8984,7 +9329,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             result = []
             found_bridges = set()
             
@@ -9097,7 +9442,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'networks': []}
 
         try:
-            host = self.current_host or self.config.host
+            host = self.host
 
             # get online nodes
             nodes_url = f"https://{host}:8006/api2/json/nodes"
@@ -9223,7 +9568,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             isos = []
             # Get all storage if not specified
             storages = [storage] if storage else [s['storage'] for s in self.get_storage_list(node) if 'iso' in s.get('content', '')]
@@ -9251,7 +9596,7 @@ echo "AGENT_INSTALLED_OK"
                 return []
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/pools"
             response = self._api_get(url)
             
@@ -9269,7 +9614,7 @@ echo "AGENT_INSTALLED_OK"
                 return {}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/pools/{pool_id}"
             response = self._api_get(url)
             
@@ -9295,7 +9640,7 @@ echo "AGENT_INSTALLED_OK"
     def create_pool(self, poolid, comment=''):
         if not self.is_connected and not self.connect_to_proxmox():
             return {'success': False, 'error': 'Not connected'}
-        host = self.current_host or self.config.host
+        host = self.host
         try:
             payload = {'poolid': poolid}
             if comment: payload['comment'] = comment
@@ -9314,7 +9659,7 @@ echo "AGENT_INSTALLED_OK"
         adding and removing members are separate PUT calls with 'delete' flag."""
         if not self.is_connected and not self.connect_to_proxmox():
             return {'success': False, 'error': 'Not connected'}
-        host = self.current_host or self.config.host
+        host = self.host
         url = f"https://{host}:8006/api2/json/pools/{poolid}"
         try:
             data = {}
@@ -9343,7 +9688,7 @@ echo "AGENT_INSTALLED_OK"
         if not self.is_connected and not self.connect_to_proxmox():
             return {'success': False, 'error': 'Not connected'}
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             resp = self._api_delete(f"https://{host}:8006/api2/json/pools/{poolid}")
             return {'success': True} if resp.status_code == 200 else {'success': False, 'error': f'PVE {resp.status_code}'}
         except Exception as e:
@@ -9818,7 +10163,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             
             # First get current network config
             config_url = f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -10066,7 +10411,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node}/rrddata"
             
             response = self._create_session().get(url, params={'timeframe': timeframe})
@@ -10833,7 +11178,7 @@ echo "AGENT_INSTALLED_OK"
                 raise ConnectionError(f"Not connected to cluster")
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node}/apt/update"
             response = self._create_session().get(url, timeout=15)
             
@@ -10854,7 +11199,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect'}
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/nodes/{node}/apt/update"
             response = self._create_session().post(url, timeout=15)
             
@@ -10882,7 +11227,7 @@ echo "AGENT_INSTALLED_OK"
 
     # ==================== END NODE MANAGEMENT METHODS ====================
     
-    def run_balance_check(self):
+    def run_balance_check(self, force=False):
         """
         Run a single balance check iteration
         
@@ -10953,7 +11298,7 @@ echo "AGENT_INSTALLED_OK"
                         self.logger.info(f"[OK] Cluster balanced after {migrations_done} migration(s)")
                     break
                 
-                if not self.config.auto_migrate:
+                if not force and not self.config.auto_migrate:
                     break
                 
                 # MK: Find migration candidate, excluding already migrated VMs
@@ -10980,11 +11325,20 @@ echo "AGENT_INSTALLED_OK"
             
             if migrations_done > 1:
                 self.logger.info(f"[SUMMARY] Completed {migrations_done} migration(s) in this cycle")
-            
+
+            # NS: Mar 2026 - Proactive anti-affinity enforcement (Issue #148)
+            # Even if cluster is balanced, fix any anti-affinity violations
+            if self.config.auto_migrate and not self.config.dry_run:
+                try:
+                    affinity_migrations = self._enforce_affinity_rules(node_status)
+                    migrations_done += affinity_migrations
+                except Exception as e:
+                    self.logger.error(f"Error in affinity enforcement: {e}")
+
             self.last_run = datetime.now()
             self.logger.info(f"Balance check completed at {self.last_run}")
             self.logger.info("=" * 60)
-            
+
         except Exception as e:
             self.logger.error(f"Error in balance check: {e}")
     
@@ -11033,7 +11387,7 @@ echo "AGENT_INSTALLED_OK"
             return False
         
         try:
-            host = self.current_host or self.config.host
+            host = self.host
             url = f"https://{host}:8006/api2/json/version"
             response = self._create_session().get(url, timeout=5)
             return response.status_code == 200
@@ -11830,6 +12184,154 @@ echo DONE""",
             else:
                 out[ctrl_id] = {'success': False, 'error': result or 'SSH command failed'}
         return out
+
+    def _fetch_qemu_ips(self, node: str, vmid: int) -> list:
+        """Fetch IP addresses from QEMU guest agent for a running VM.
+        Returns IPv4 addresses first, then IPv6."""
+        try:
+            url = f"https://{self.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
+            resp = self._create_session().get(url, timeout=8)
+            if resp.status_code != 200:
+                return []
+            interfaces = resp.json().get('data', {}).get('result', [])
+            ipv4s, ipv6s = [], []
+            for iface in interfaces:
+                if iface.get('name') == 'lo':
+                    continue
+                for addr in iface.get('ip-addresses', []):
+                    ip = addr.get('ip-address', '')
+                    if not ip:
+                        continue
+                    if ip.startswith('127.') or ip == '::1':
+                        continue
+                    if ip.lower().startswith('fe80:'):
+                        continue
+                    if addr.get('ip-address-type') == 'ipv4':
+                        ipv4s.append(ip)
+                    else:
+                        ipv6s.append(ip)
+            return ipv4s + ipv6s
+        except Exception:
+            return []
+
+    def _fetch_qemu_disk_usage(self, node: str, vmid: int) -> dict:
+        """Get actual filesystem usage from guest agent (get-fsinfo).
+        Returns {used, total} in bytes, or empty dict if unavailable."""
+        try:
+            url = f"https://{self.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent/get-fsinfo"
+            resp = self._create_session().get(url, timeout=8)
+            if resp.status_code != 200:
+                return {}
+            filesystems = resp.json().get('data', {}).get('result', [])
+            total, used = 0, 0
+            for fs in filesystems:
+                # skip snap/loop/tmpfs mounts
+                mt = fs.get('mountpoint', '')
+                if '/snap/' in mt or mt.startswith('/boot/efi'):
+                    continue
+                fs_total = fs.get('total-bytes', 0)
+                fs_used = fs.get('used-bytes', 0)
+                if fs_total > 0:
+                    total += fs_total
+                    used += fs_used
+            return {'used': used, 'total': total} if total > 0 else {}
+        except Exception:
+            return {}
+
+    def _fetch_lxc_ips(self, node: str, vmid: int) -> list:
+        """Fetch IP addresses for a running LXC container.
+        Proxmox returns either inet/inet6 strings or ip-addresses array depending on version."""
+        try:
+            url = f"https://{self.host}:8006/api2/json/nodes/{node}/lxc/{vmid}/interfaces"
+            resp = self._create_session().get(url, timeout=8)
+            if resp.status_code != 200:
+                return []
+            interfaces = resp.json().get('data', [])
+            ipv4s, ipv6s = [], []
+            for iface in interfaces:
+                if iface.get('name') == 'lo':
+                    continue
+                # format 1: inet/inet6 as CIDR strings
+                inet = iface.get('inet', '')
+                if inet:
+                    ip = inet.split('/')[0]
+                    if not ip.startswith('127.'):
+                        ipv4s.append(ip)
+                inet6 = iface.get('inet6', '')
+                if inet6:
+                    ip = inet6.split('/')[0]
+                    if ip != '::1' and not ip.lower().startswith('fe80:'):
+                        ipv6s.append(ip)
+                # format 2: ip-addresses array (newer PVE)
+                for addr in iface.get('ip-addresses', []):
+                    ip = addr.get('ip-address', '')
+                    if not ip:
+                        continue
+                    if ip.startswith('127.') or ip == '::1' or ip.lower().startswith('fe80:'):
+                        continue
+                    if addr.get('ip-address-type') == 'ipv4':
+                        if ip not in ipv4s:
+                            ipv4s.append(ip)
+                    else:
+                        if ip not in ipv6s:
+                            ipv6s.append(ip)
+            return ipv4s + ipv6s
+        except Exception:
+            return []
+
+    def refresh_ip_cache(self) -> None:
+        if not self.is_connected or not self.session:
+            return
+        try:
+            resources = self.get_vm_resources()
+            running = [r for r in resources if r.get('status') == 'running']
+            if not running:
+                return
+
+            def fetch_one(r):
+                node = r.get('node', '')
+                vmid = r.get('vmid')
+                if not node or not vmid:
+                    return None
+                vm_type = r.get('type', 'qemu')
+                if vm_type == 'lxc':
+                    ips = self._fetch_lxc_ips(node, vmid)
+                    return (node, vmid, ips, None)
+                else:
+                    ips = self._fetch_qemu_ips(node, vmid)
+                    disk = self._fetch_qemu_disk_usage(node, vmid)
+                    return (node, vmid, ips, disk)
+
+            tasks = [lambda r=r: fetch_one(r) for r in running]
+            results = run_concurrent(tasks, timeout=15.0)
+
+            with self._ip_cache_lock:
+                for result in results:
+                    if result is None:
+                        continue
+                    node, vmid, ips, disk = result
+                    self._ip_cache[(node, vmid)] = ips
+            with self._disk_cache_lock:
+                for result in results:
+                    if result is None:
+                        continue
+                    node, vmid, ips, disk = result
+                    if disk:
+                        self._disk_cache[(node, vmid)] = disk
+        except Exception as e:
+            self.logger.debug(f"[IP cache] refresh failed: {e}")
+
+    def _ip_refresh_loop(self) -> None:
+        """Background loop that refreshes the IP cache every 30 seconds."""
+        if self.stop_event.wait(15):  # 15s initial delay
+            return
+        while not self.stop_event.is_set():
+            try:
+                if self.is_connected:
+                    self.refresh_ip_cache()
+            except Exception as e:
+                self.logger.debug(f"[IP refresh loop] error: {e}")
+            self.stop_event.wait(30)
 
     def start(self):
         """Start the PegaProx daemon"""

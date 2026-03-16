@@ -131,6 +131,17 @@
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                 </svg>
             ),
+            Sun: () => (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="5" strokeWidth={2} />
+                    <path strokeLinecap="round" strokeWidth={2} d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                </svg>
+            ),
+            Moon: () => (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+                </svg>
+            ),
             Clock: () => (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -223,8 +234,8 @@
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
             ),
-            Search: () => (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            Search: ({style, className, ...props} = {}) => (
+                <svg className={className || "w-4 h-4"} fill="none" stroke="currentColor" viewBox="0 0 24 24" style={style} {...props}>
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </svg>
             ),
@@ -548,6 +559,51 @@
             FolderOpen: () => (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
+                </svg>
+            ),
+            // NS: diagram topology icons - Mar 2026
+            DiagramRouter: ({ className, style } = {}) => (
+                <svg className={className || "w-6 h-6"} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <ellipse cx="12" cy="12" rx="9" ry="5" strokeWidth={1.5} />
+                    <path strokeLinecap="round" strokeWidth={1.5} d="M12 7V3m0 18v-4M5 9L2 6m20 12l-3-3M19 9l3-3M2 18l3-3" />
+                    <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                </svg>
+            ),
+            DiagramSwitch: ({ className, style } = {}) => (
+                <svg className={className || "w-6 h-6"} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <rect x="2" y="8" width="20" height="8" rx="1.5" strokeWidth={1.5} />
+                    <path strokeLinecap="round" strokeWidth={1.5} d="M6 12h2m3 0h2m3 0h2" />
+                    <path strokeLinecap="round" strokeWidth={1.5} d="M7 8V5m10 3V5M7 16v3m10-3v3" />
+                </svg>
+            ),
+            // MK: server icon for QEMU VMs in diagram view
+            DiagramServer: ({ className, style } = {}) => (
+                <svg className={className || "w-6 h-6"} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <rect x="4" y="2" width="16" height="6" rx="1" strokeWidth={1.5} />
+                    <rect x="4" y="10" width="16" height="6" rx="1" strokeWidth={1.5} />
+                    <circle cx="7" cy="5" r="1" fill="currentColor" stroke="none" />
+                    <circle cx="7" cy="13" r="1" fill="currentColor" stroke="none" />
+                    <path strokeLinecap="round" strokeWidth={1.5} d="M9 20h6M12 18v2" />
+                </svg>
+            ),
+            DiagramWorkstation: ({ className, style } = {}) => (
+                <svg className={className || "w-6 h-6"} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <rect x="3" y="3" width="18" height="12" rx="1.5" strokeWidth={1.5} />
+                    <path strokeLinecap="round" strokeWidth={1.5} d="M8 21h8M12 15v6" />
+                    <path strokeWidth={1.5} d="M7 10h3M7 7h5" />
+                </svg>
+            ),
+            // zoom/fit icons for diagram toolbar - LW
+            ZoomIn: ({ className, style } = {}) => (
+                <svg className={className || "w-4 h-4"} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="7" strokeWidth={2} />
+                    <path strokeLinecap="round" strokeWidth={2} d="M21 21l-4.35-4.35M11 8v6m-3-3h6" />
+                </svg>
+            ),
+            ZoomOut: ({ className, style } = {}) => (
+                <svg className={className || "w-4 h-4"} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="7" strokeWidth={2} />
+                    <path strokeLinecap="round" strokeWidth={2} d="M21 21l-4.35-4.35M8 11h6" />
                 </svg>
             ),
         };

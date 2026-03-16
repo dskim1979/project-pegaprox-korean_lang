@@ -126,18 +126,18 @@ class PBSManager:
             if time.time() - self._ticket_time > 5400:  # 90 min
                 self.connect()
     
-    def api_get(self, path: str, params: dict = None) -> dict:
+    def api_get(self, path: str, params: dict = None, timeout: int = 30) -> dict:
         """GET request to PBS API"""
         self._ensure_ticket()
         try:
             url = f"{self.base_url}/{path.lstrip('/')}"
-            resp = self._session.get(url, params=params, timeout=30)
+            resp = self._session.get(url, params=params, timeout=timeout)
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 401:
                 # Token expired, try reconnect
                 if self.connect():
-                    resp = self._session.get(url, params=params, timeout=30)
+                    resp = self._session.get(url, params=params, timeout=timeout)
                     if resp.status_code == 200:
                         return resp.json()
             logging.warning(f"[PBS:{self.name}] GET {path} → {resp.status_code}")
@@ -259,11 +259,12 @@ class PBSManager:
         return self.api_get(f'/admin/datastore/{store}/status')
     
     def get_snapshots(self, store: str, ns: str = None) -> dict:
-        """List all snapshots in a datastore"""
+        """List all snapshots in a datastore.
+        LW: longer timeout because large datastores can have thousands of entries"""
         params = {}
         if ns:
             params['ns'] = ns
-        return self.api_get(f'/admin/datastore/{store}/snapshots', params=params)
+        return self.api_get(f'/admin/datastore/{store}/snapshots', params=params, timeout=60)
     
     def get_groups(self, store: str, ns: str = None) -> dict:
         """List backup groups (vm/ct/host) in a datastore"""

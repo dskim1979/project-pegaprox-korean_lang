@@ -215,28 +215,30 @@ def rename_cluster(cluster_id):
     if not ok: return err
     
     data = request.json or {}
-    
-    if not data.get('display_name'):
+    new_name = data.get('display_name', '').strip() if data.get('display_name') is not None else None
+
+    if new_name is None:
         return jsonify({'error': 'display_name required'}), 400
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     db = get_db()
     usr = getattr(request, 'session', {}).get('user', 'system')
     ip = request.remote_addr
-    
-    # Get old name for audit
+
     cluster = db.query_one('SELECT name, display_name FROM clusters WHERE id = ?', (cluster_id,))
     old_name = cluster['display_name'] or cluster['name'] if cluster else cluster_id
-    new_name = data.get('display_name')
-    
+
+    # empty string = reset to original name
     db.execute('''
         UPDATE clusters SET display_name = ?, updated_at = ? WHERE id = ?
-    ''', (new_name, datetime.now().isoformat(), cluster_id))
-    
-    log_audit(usr, 'cluster.renamed', f"Renamed cluster from '{old_name}' to '{new_name}' (ID: {cluster_id})", ip_address=ip)
-    
+    ''', (new_name or '', datetime.now().isoformat(), cluster_id))
+
+    action = 'cluster.renamed' if new_name else 'cluster.name_reset'
+    msg = f"Renamed cluster from '{old_name}' to '{new_name}'" if new_name else f"Reset cluster name to original (was '{old_name}')"
+    log_audit(usr, action, f"{msg} (ID: {cluster_id})", ip_address=ip)
+
     return jsonify({'success': True})
 
 
@@ -454,6 +456,29 @@ def get_cluster_group_lb_history(group_id):
     )
 
     return jsonify([dict(e) for e in events] if events else [])
+
+
+@bp.route('/api/cluster-groups/<group_id>/balance-now', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def trigger_xclb_balance_now(group_id):
+    """Manual cross-cluster balance trigger (#149)"""
+    db = get_db()
+    row = db.query_one('SELECT * FROM cluster_groups WHERE id = ?', (group_id,))
+    if not row:
+        return jsonify({'error': 'Group not found'}), 404
+
+    group = dict(row)
+    if not group.get('cross_cluster_lb_enabled'):
+        return jsonify({'error': 'Cross-cluster LB is not enabled for this group'}), 400
+
+    from pegaprox.background.cross_cluster_lb import run_cross_cluster_balance_check
+    import gevent
+    gevent.spawn(run_cross_cluster_balance_check, group)
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'xclb.manual', f"Manual cross-cluster balance triggered for group {group.get('name', group_id)}")
+
+    return jsonify({'message': 'Cross-cluster balance check started'})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/options', methods=['GET'])

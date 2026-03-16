@@ -65,14 +65,14 @@
 
             // LW: status dot for VM list
             const statusDot = (status) => {
-                const color = status === 'running' ? '#60b515' : status === 'stopped' ? '#728b9a' : '#efc006';
+                const color = status === 'running' ? '#60b515' : status === 'stopped' ? 'var(--corp-text-muted)' : '#efc006';
                 return <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{background: color}} />;
             };
 
             if (loading) {
                 return (
                     <div className="flex items-center justify-center py-20">
-                        <Icons.RotateCw className="w-6 h-6 animate-spin" style={{color: isCorporate ? '#49afd9' : undefined}} />
+                        <Icons.RotateCw className="w-6 h-6 animate-spin" style={{color: isCorporate ? 'var(--corp-accent)' : undefined}} />
                         <span className="ml-3 text-gray-400">{t('loading')}...</span>
                     </div>
                 );
@@ -92,15 +92,15 @@
                 return (
                     <div className="flex h-full" style={{minHeight: '500px'}}>
                         {/* Left panel - network list */}
-                        <div className="w-64 flex-shrink-0 border-r" style={{borderColor: '#485764', background: '#1b2a32'}}>
-                            <div className="p-2 border-b" style={{borderColor: '#485764'}}>
+                        <div className="w-64 flex-shrink-0 border-r" style={{borderColor: 'var(--corp-border-medium)', background: 'var(--corp-bar-track)'}}>
+                            <div className="p-2 border-b" style={{borderColor: 'var(--corp-border-medium)'}}>
                                 <div className="relative">
-                                    <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2" style={{color: '#728b9a'}} />
+                                    <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2" style={{color: 'var(--corp-text-muted)'}} />
                                     <input
                                         value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
                                         placeholder={t('search') + '...'}
                                         className="w-full pl-7 pr-2 py-1 text-[13px] bg-transparent border rounded text-white placeholder-gray-500"
-                                        style={{borderColor: '#485764'}}
+                                        style={{borderColor: 'var(--corp-border-medium)'}}
                                     />
                                 </div>
                             </div>
@@ -116,13 +116,13 @@
                                             className="flex items-center gap-2 px-3 py-1.5 cursor-pointer text-[13px]"
                                             style={isSel
                                                 ? {background: '#324f61', color: '#e9ecef'}
-                                                : {color: isActive ? '#adbbc4' : '#728b9a'}}
+                                                : {color: isActive ? 'var(--corp-text-secondary)' : 'var(--corp-text-muted)'}}
                                             onMouseEnter={e => { if (!isSel) { e.currentTarget.style.background = '#29414e'; }}}
                                             onMouseLeave={e => { if (!isSel) { e.currentTarget.style.background = ''; }}}
                                         >
-                                            <Icons.Network className="w-4 h-4 flex-shrink-0" style={{color: isActive ? '#49afd9' : '#728b9a'}} />
+                                            <Icons.Network className="w-4 h-4 flex-shrink-0" style={{color: isActive ? 'var(--corp-accent)' : 'var(--corp-text-muted)'}} />
                                             <span className="flex-1 truncate">{net.name}</span>
-                                            <span className="text-[11px]" style={{color: '#728b9a'}}>{vmCount}</span>
+                                            <span className="text-[11px]" style={{color: 'var(--corp-text-muted)'}}>{vmCount}</span>
                                         </div>
                                     );
                                 })}
@@ -136,44 +136,44 @@
                                     {/* Header */}
                                     <div className="corp-content-header">
                                         <div className="flex items-center gap-2">
-                                            <Icons.Network className="w-4 h-4" style={{color: '#49afd9'}} />
+                                            <Icons.Network className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
                                             <span className="font-medium text-white">{selected.name}</span>
                                             {selected.type === 'OVSBridge' && (
                                                 <span className="corp-badge-blue text-[10px] px-1.5 py-0.5 rounded">OVS</span>
                                             )}
                                         </div>
                                         <button onClick={fetchNetworks} className="p-1 rounded hover:bg-white/10" title={t('refreshData')}>
-                                            <Icons.RotateCw className="w-3.5 h-3.5" style={{color: '#728b9a'}} />
+                                            <Icons.RotateCw className="w-3.5 h-3.5" style={{color: 'var(--corp-text-muted)'}} />
                                         </button>
                                     </div>
 
                                     {/* Properties */}
                                     <div className="p-4 space-y-4">
                                         <div className="corp-property-grid">
-                                            <span style={{color: '#728b9a'}}>{t('type')}</span>
+                                            <span style={{color: 'var(--corp-text-muted)'}}>{t('type')}</span>
                                             <span className="text-white">{selected.type}</span>
 
                                             {selected.address && <>
-                                                <span style={{color: '#728b9a'}}>IP</span>
+                                                <span style={{color: 'var(--corp-text-muted)'}}>IP</span>
                                                 <span className="text-white">{selected.cidr || selected.address}</span>
                                             </>}
 
                                             {selected.gateway && <>
-                                                <span style={{color: '#728b9a'}}>Gateway</span>
+                                                <span style={{color: 'var(--corp-text-muted)'}}>Gateway</span>
                                                 <span className="text-white">{selected.gateway}</span>
                                             </>}
 
                                             {selected.bridge_ports && <>
-                                                <span style={{color: '#728b9a'}}>{t('bridgePorts')}</span>
+                                                <span style={{color: 'var(--corp-text-muted)'}}>{t('bridgePorts')}</span>
                                                 <span className="text-white">{selected.bridge_ports}</span>
                                             </>}
 
                                             {selected.comments && <>
-                                                <span style={{color: '#728b9a'}}>{t('description')}</span>
+                                                <span style={{color: 'var(--corp-text-muted)'}}>{t('description')}</span>
                                                 <span className="text-white">{selected.comments}</span>
                                             </>}
 
-                                            <span style={{color: '#728b9a'}}>{t('presentOnNodes')}</span>
+                                            <span style={{color: 'var(--corp-text-muted)'}}>{t('presentOnNodes')}</span>
                                             <span className="text-white">{selected.nodes?.join(', ') || '-'}</span>
                                         </div>
 
@@ -188,20 +188,20 @@
                                                     <table className="w-full text-[13px]">
                                                         <thead>
                                                             <tr>
-                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: '#adbbc4'}}>{t('status')}</th>
-                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: '#adbbc4'}}>{t('name')}</th>
-                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: '#adbbc4'}}>VMID</th>
-                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: '#adbbc4'}}>{t('type')}</th>
-                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: '#adbbc4'}}>{t('node')}</th>
-                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: '#adbbc4'}}>Interface</th>
+                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: 'var(--corp-text-secondary)'}}>{t('status')}</th>
+                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: 'var(--corp-text-secondary)'}}>{t('name')}</th>
+                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: 'var(--corp-text-secondary)'}}>VMID</th>
+                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: 'var(--corp-text-secondary)'}}>{t('type')}</th>
+                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: 'var(--corp-text-secondary)'}}>{t('node')}</th>
+                                                                <th className="text-left py-1.5 px-3 font-medium" style={{color: 'var(--corp-text-secondary)'}}>Interface</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
                                                             {selected.vms.map((vm, i) => (
                                                                 <tr key={`${vm.vmid}-${vm.iface}-${i}`}
                                                                     className="border-t"
-                                                                    style={{borderColor: '#37474f'}}
-                                                                    onMouseEnter={e => e.currentTarget.style.background = '#29414e'}
+                                                                    style={{borderColor: 'var(--corp-divider)'}}
+                                                                    onMouseEnter={e => e.currentTarget.style.background = 'var(--color-hover)'}
                                                                     onMouseLeave={e => e.currentTarget.style.background = ''}
                                                                 >
                                                                     <td className="py-1.5 px-3 text-white">
@@ -209,19 +209,19 @@
                                                                         {vm.status}
                                                                     </td>
                                                                     <td className="py-1.5 px-3 text-white">{vm.name || '-'}</td>
-                                                                    <td className="py-1.5 px-3" style={{color: '#adbbc4'}}>{vm.vmid}</td>
-                                                                    <td className="py-1.5 px-3" style={{color: '#adbbc4'}}>
+                                                                    <td className="py-1.5 px-3" style={{color: 'var(--corp-text-secondary)'}}>{vm.vmid}</td>
+                                                                    <td className="py-1.5 px-3" style={{color: 'var(--corp-text-secondary)'}}>
                                                                         {vm.type === 'qemu' ? 'VM' : 'CT'}
                                                                     </td>
-                                                                    <td className="py-1.5 px-3" style={{color: '#adbbc4'}}>{vm.node}</td>
-                                                                    <td className="py-1.5 px-3" style={{color: '#728b9a'}}>{vm.iface}</td>
+                                                                    <td className="py-1.5 px-3" style={{color: 'var(--corp-text-secondary)'}}>{vm.node}</td>
+                                                                    <td className="py-1.5 px-3" style={{color: 'var(--corp-text-muted)'}}>{vm.iface}</td>
                                                                 </tr>
                                                             ))}
                                                         </tbody>
                                                     </table>
                                                 </div>
                                             ) : (
-                                                <div className="text-center py-6" style={{color: '#728b9a'}}>
+                                                <div className="text-center py-6" style={{color: 'var(--corp-text-muted)'}}>
                                                     {t('noVmsOnBridge')}
                                                 </div>
                                             )}

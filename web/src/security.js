@@ -7,6 +7,7 @@
         function SecuritySettingsSection({ addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin } = useAuth();
+            const { isCorporate } = useLayout();
             const [settings, setSettings] = useState({
                 login_max_attempts: 5,
                 login_lockout_time: 300,
@@ -1852,6 +1853,7 @@
         function UpdateManagerSection({ clusterId, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin } = useAuth();
+            const { isCorporate } = useLayout();
             const [loading, setLoading] = useState(false);
             const [checking, setChecking] = useState(false);
             const [updateStatus, setUpdateStatus] = useState(null);
@@ -3212,6 +3214,7 @@
         function SmbiosAutoConfigSection({ clusterId, selectedCluster, updateConfig, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
+            const { isCorporate } = useLayout();
             const [smbiosStatus, setSmbiosStatus] = useState({});
             const [smbiosLoading, setSmbiosLoading] = useState(false);
             const [smbiosActionLoading, setSmbiosActionLoading] = useState({});  // per-node loading state

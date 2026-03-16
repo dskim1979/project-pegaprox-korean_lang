@@ -438,8 +438,8 @@
                             </div>
                             <div className="bg-proxmox-dark rounded-lg p-4">
                                 <div className="text-xs text-gray-500 mb-1">Disk</div>
-                                <div className="text-lg font-bold text-white">{formatBytes(vm.disk || 0)}</div>
-                                <div className="text-xs text-gray-500">von {formatBytes(vm.maxdisk || 0)}</div>
+                                <div className="text-lg font-bold text-white">{vm.disk > 0 ? formatBytes(vm.disk) : formatBytes(vm.maxdisk || 0)}</div>
+                                <div className="text-xs text-gray-500">{vm.disk > 0 ? `von ${formatBytes(vm.maxdisk || 0)}` : t('allocated') || 'allocated'}</div>
                             </div>
                             <div className="bg-proxmox-dark rounded-lg p-4">
                                 <div className="text-xs text-gray-500 mb-1">Uptime</div>
@@ -653,7 +653,7 @@
                             <div className="px-6 pb-6">
                                 <div className="text-xs text-gray-500 mb-2">Tags</div>
                                 <div className="flex flex-wrap gap-2">
-                                    {vm.tags.split(';').map(tag => (
+                                    {(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                         <span key={tag} className="px-2 py-1 bg-proxmox-dark rounded text-xs text-gray-400">
                                             {tag}
                                         </span>
@@ -988,8 +988,8 @@
                         </div>
                         <div className="bg-proxmox-dark rounded-lg p-4">
                             <div className="text-xs text-gray-500 mb-1">Disk</div>
-                            <div className="text-lg font-bold text-white">{formatBytes(vm.disk || 0)}</div>
-                            <div className="text-xs text-gray-500">{t('of')} {formatBytes(vm.maxdisk || 0)}</div>
+                            <div className="text-lg font-bold text-white">{vm.disk > 0 ? formatBytes(vm.disk) : formatBytes(vm.maxdisk || 0)}</div>
+                            <div className="text-xs text-gray-500">{vm.disk > 0 ? `${t('of')} ${formatBytes(vm.maxdisk || 0)}` : t('allocated') || 'allocated'}</div>
                         </div>
                         <div className="bg-proxmox-dark rounded-lg p-4">
                             <div className="text-xs text-gray-500 mb-1">{t('uptime')}</div>
@@ -1273,7 +1273,7 @@
                         <div className="px-6 pb-6">
                             <div className="text-xs text-gray-500 mb-2">Tags</div>
                             <div className="flex flex-wrap gap-2">
-                                {vm.tags.split(';').map(tag => (
+                                {(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                     <span key={tag} className="px-2 py-1 bg-proxmox-dark rounded text-xs text-gray-400">
                                         {tag}
                                     </span>
@@ -1291,6 +1291,13 @@
             const { getAuthHeaders } = useAuth();
             const [activeDetailTab, setActiveDetailTab] = useState('summary');
             const [showActionsMenu, setShowActionsMenu] = useState(false);
+            const [snapshots, setSnapshots] = useState([]);
+            const [efficientSnapshots, setEfficientSnapshots] = useState([]);
+            const [snapsLoading, setSnapsLoading] = useState(false);
+            const [showCreateSnap, setShowCreateSnap] = useState(false);
+            const [snapName, setSnapName] = useState('');
+            const [snapDesc, setSnapDesc] = useState('');
+            const [snapRam, setSnapRam] = useState(false);
 
             const isQemu = vm.type === 'qemu';
             const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
@@ -1300,6 +1307,62 @@
             const authFetch = async (url, opts = {}) => {
                 try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
                 catch(e) { console.error(e); return null; }
+            };
+
+            const fetchSnapshots = async () => {
+                setSnapsLoading(true);
+                try {
+                    const base = `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}`;
+                    const [stdRes, effRes] = await Promise.all([
+                        authFetch(`${base}/snapshots`),
+                        authFetch(`${base}/efficient-snapshots?refresh=true`)
+                    ]);
+                    if (stdRes?.ok) setSnapshots(await stdRes.json());
+                    if (effRes?.ok) setEfficientSnapshots(await effRes.json());
+                } catch(e) { console.error('snapshots fetch:', e); }
+                setSnapsLoading(false);
+            };
+
+            // refetch when VM changes while snapshots tab is open
+            React.useEffect(() => {
+                setSnapshots([]); setEfficientSnapshots([]);
+                if (activeDetailTab === 'snapshots') fetchSnapshots();
+            }, [vm.vmid, clusterId]);
+
+            const handleCreateSnap = async () => {
+                if (!snapName.trim()) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ snapname: snapName, description: snapDesc, vmstate: snapRam ? 1 : 0 })
+                    });
+                    if (r?.ok) { addToast?.(t('snapshotCreated') || 'Snapshot created'); setShowCreateSnap(false); setSnapName(''); setSnapDesc(''); setSnapRam(false); fetchSnapshots(); }
+                    else addToast?.('Snapshot failed', 'error');
+                } catch(e) { addToast?.(e.message, 'error'); }
+            };
+
+            const handleDeleteSnap = async (name) => {
+                if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
+                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+            };
+
+            const handleRollbackSnap = async (name) => {
+                if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
+                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+            };
+
+            const handleDeleteEfficientSnap = async (id, name) => {
+                if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
+                if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+            };
+
+            const handleRollbackEfficientSnap = async (id, name) => {
+                if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
+                if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
             };
 
             const formatBytes = b => {
@@ -1330,6 +1393,9 @@
             const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);
             const [guestInfo, setGuestInfo] = useState(null);
             const [vmHwInfo, setVmHwInfo] = useState(null);
+            const [metricsTimeframe, setMetricsTimeframe] = useState('hour');
+            const [metricsData, setMetricsData] = useState(null);
+            const [metricsLoading, setMetricsLoading] = useState(false);
 
             // Close actions menu on outside click
             useEffect(() => {
@@ -1413,6 +1479,27 @@
                     .catch(() => {});
             }, [vm.vmid, clusterId]);
 
+            // NS: inline perf charts - only bother fetching when vm is actually up
+            const [metricsRefreshTick, setMetricsRefreshTick] = useState(0);
+            const fetchMetrics = React.useCallback(() => {
+                if (!isRunning) return;
+                setMetricsLoading(true);
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${metricsTimeframe}`)
+                    .then(r => r?.ok ? r.json() : null)
+                    .then(d => { setMetricsData(d); setMetricsLoading(false); })
+                    .catch(() => setMetricsLoading(false));
+            }, [metricsTimeframe, vm.vmid, isRunning, clusterId]);
+
+            useEffect(() => {
+                fetchMetrics();
+            }, [fetchMetrics, metricsRefreshTick]);
+
+            const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
+            const memDataGB = React.useMemo(() => {
+                if (!metricsData?.metrics?.memory || !maxMemGB) return [];
+                return metricsData.metrics.memory.map(p => (p / 100) * maxMemGB);
+            }, [metricsData, maxMemGB]);
+
             // Toggle HA
             const toggleProxmoxHa = async () => {
                 setHaLoading(true);
@@ -1457,7 +1544,7 @@
                     )}
 
                     {/* Header Bar - Clarity dark theme */}
-                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: '#22343c'}}>
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: 'var(--corp-header-bg)'}}>
                         <div className="flex items-center gap-2">
                             <button onClick={onBack} className="p-1 hover:text-white" style={{color: '#adbbc4'}} title={t('backToList')}>
                                 <Icons.ChevronLeft className="w-4 h-4" />
@@ -1503,19 +1590,19 @@
                                 {showActionsMenu && (
                                     <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
                                         {onShowMetrics && (
-                                            <button onClick={() => { onShowMetrics(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                            <button onClick={() => { onShowMetrics(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                                 <Icons.BarChart className="w-3.5 h-3.5" /> {t('performanceMetrics')}
                                             </button>
                                         )}
-                                        <button onClick={() => { onMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                        <button onClick={() => { onMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.ArrowRight className="w-3.5 h-3.5" /> {t('migrate')}
                                         </button>
                                         {showCrossCluster && (
-                                            <button onClick={() => { onCrossClusterMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                            <button onClick={() => { onCrossClusterMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                                 <Icons.Globe className="w-3.5 h-3.5" /> {t('crossClusterMigrate')}
                                             </button>
                                         )}
-                                        <button onClick={() => { onClone(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#adbbc4'}}>
+                                        <button onClick={() => { onClone(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
                                             <Icons.Copy className="w-3.5 h-3.5" /> {t('clone')}
                                         </button>
                                         {isRunning && isQemu && (
@@ -1528,7 +1615,7 @@
                                                 <Icons.XCircle className="w-3.5 h-3.5" /> {t('forceStop')}
                                             </button>
                                         )}
-                                        <div className="my-1" style={{borderTop: '1px solid #485764'}}></div>
+                                        <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
                                         <button onClick={() => { onDelete(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
                                             <Icons.Trash className="w-3.5 h-3.5" /> {t('delete')}
                                         </button>
@@ -1539,12 +1626,16 @@
                     </div>
 
                     {/* Tab Strip - Clarity style */}
-                    <div className="corp-tab-strip px-4" style={{background: '#22343c'}}>
+                    <div className="corp-tab-strip px-4">
                         <button className={activeDetailTab === 'summary' ? 'active' : ''} onClick={() => setActiveDetailTab('summary')}>
-                            {t('summary')}
+                            <Icons.Monitor className="w-3 h-3 inline mr-1" />{t('summary')}
+                        </button>
+                        <button className={activeDetailTab === 'snapshots' ? 'active' : ''}
+                            onClick={() => { setActiveDetailTab('snapshots'); fetchSnapshots(); }}>
+                            <Icons.Clock className="w-3 h-3 inline mr-1" />{t('snapshotsTab') || 'Snapshots'}
                         </button>
                         <button onClick={() => onOpenConfig(vm)}>
-                            {t('configure')}
+                            <Icons.Settings className="w-3 h-3 inline mr-1" />{t('configure')}
                         </button>
                         {/* LW: Feb 2026 - console tab for QEMU (VNC) and LXC (xterm.js) */}
                         {isRunning && (
@@ -1561,17 +1652,17 @@
                             <div className="flex gap-5">
                                 {/* Left: Console Preview Area */}
                                 <div className="flex-shrink-0" style={{width: '280px'}}>
-                                    <div className="flex items-center justify-center" style={{height: '180px', background: '#17242b', border: '1px solid #485764'}}>
+                                    <div className="flex items-center justify-center" style={{height: '180px', background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
                                         <div className="text-center">
                                             {isQemu
-                                                ? <Icons.Monitor className="w-12 h-12 mx-auto mb-2" style={{color: '#485764'}} />
-                                                : <Icons.Box className="w-12 h-12 mx-auto mb-2" style={{color: '#485764'}} />
+                                                ? <Icons.Monitor className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
+                                                : <Icons.Box className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
                                             }
                                             <div className="text-[11px]" style={{color: '#728b9a'}}>{isRunning ? t('consoleAvailable') || 'Console available' : t('vmStopped') || 'VM is powered off'}</div>
                                         </div>
                                     </div>
                                     {isRunning && (
-                                        <button onClick={() => onOpenConsole(vm)} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: '#22343c', border: '1px solid #485764', color: '#49afd9'}}>
+                                        <button onClick={() => onOpenConsole(vm)} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-accent)'}}>
                                             <Icons.Terminal className="w-3.5 h-3.5" />
                                             {t('launchWebConsole') || 'Launch Web Console'}
                                         </button>
@@ -1587,7 +1678,7 @@
                                             <tr><td>{t('qemuAgent') || 'QEMU Agent'}</td><td className="flex items-center gap-1.5">{isQemu && isRunning ? (guestInfo ? <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#60b515'}}></span> {t('running')}</> : <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#f54f47'}}></span> {t('notInstalled') || 'Not installed'}</>) : <span style={{color: '#728b9a'}}>-</span>}</td></tr>
                                             <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{guestInfo?.ip_addresses?.join(', ') || '-'}</td></tr>
                                             {guestInfo?.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
-                                            {vm.tags && <tr><td>Tags</td><td><div className="flex flex-wrap gap-1">{vm.tags.split(';').map(tag => (
+                                            {vm.tags && <tr><td>Tags</td><td><div className="flex flex-wrap gap-1">{(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                                 <span key={tag} className="px-1.5 py-0.5 text-[11px]" style={{background: 'rgba(73, 175, 217, 0.12)', color: '#49afd9', border: '1px solid rgba(73, 175, 217, 0.25)'}}>{tag}</span>
                                             ))}</div></td></tr>}
                                         </tbody>
@@ -1606,8 +1697,8 @@
                                         </div>
                                         <div className="flex items-center gap-1.5">
                                             <div className="w-2 h-2 rounded-full" style={{background: '#60b515'}}></div>
-                                            <span className="text-[12px]" style={{color: '#adbbc4'}}>Disk</span>
-                                            <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{formatBytes(vm.maxdisk)}</span>
+                                            <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('disk')}</span>
+                                            <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{vm.disk > 0 ? `${formatBytes(vm.disk)} / ${formatBytes(vm.maxdisk)}` : formatBytes(vm.maxdisk)}</span>
                                         </div>
                                         <div className="flex items-center gap-1.5">
                                             <div className="w-2 h-2 rounded-full" style={{background: '#efc006'}}></div>
@@ -1642,7 +1733,7 @@
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                 {/* Left: VM Hardware */}
                                 <div style={{border: '1px solid #485764'}}>
-                                    <div className="px-3 py-2 flex items-center justify-between" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
+                                    <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                         <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('vmHardware') || 'VM Hardware'}</span>
                                     </div>
                                     <div className="p-3 space-y-2">
@@ -1652,7 +1743,7 @@
                                             <span style={{color: '#adbbc4', width: '60px'}}>CPU</span>
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-2">
-                                                    <div className="flex-1 h-1.5 overflow-hidden" style={{background: '#1b2a32'}}>
+                                                    <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
                                                         <div className="h-full" style={{width: `${Math.min(cpuPercent, 100)}%`, background: '#49afd9'}}></div>
                                                     </div>
                                                     <span style={{color: '#e9ecef', minWidth: '35px'}}>{cpuPercent}%</span>
@@ -1666,7 +1757,7 @@
                                             <span style={{color: '#adbbc4', width: '60px'}}>{t('memory') || 'Memory'}</span>
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-2">
-                                                    <div className="flex-1 h-1.5 overflow-hidden" style={{background: '#1b2a32'}}>
+                                                    <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
                                                         <div className="h-full" style={{width: `${Math.min(ramPercent, 100)}%`, background: '#9b59b6'}}></div>
                                                     </div>
                                                     <span style={{color: '#e9ecef', minWidth: '35px'}}>{ramPercent}%</span>
@@ -1675,13 +1766,29 @@
                                             </div>
                                         </div>
                                         {/* Disk */}
-                                        {vm.maxdisk && (
+                                        {vm.maxdisk > 0 && (() => {
+                                            const hasDiskData = vm.disk > 0;
+                                            const diskPct = hasDiskData ? Math.round(vm.disk / vm.maxdisk * 100) : 0;
+                                            return (
                                             <div className="flex items-center gap-2 text-[12px]">
                                                 <Icons.HardDrive className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#60b515'}} />
-                                                <span style={{color: '#adbbc4', width: '60px'}}>Disk</span>
-                                                <span style={{color: '#e9ecef'}}>{formatBytes(vm.maxdisk)}</span>
+                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('disk')}</span>
+                                                <div className="flex-1">
+                                                    {hasDiskData ? (<>
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
+                                                            <div className="h-full" style={{width: `${Math.min(diskPct, 100)}%`, background: '#60b515'}}></div>
+                                                        </div>
+                                                        <span style={{color: '#e9ecef', minWidth: '35px'}}>{diskPct}%</span>
+                                                    </div>
+                                                    <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{formatBytes(vm.disk)} / {formatBytes(vm.maxdisk)}</div>
+                                                    </>) : (
+                                                    <span style={{color: '#e9ecef'}}>{formatBytes(vm.maxdisk)}</span>
+                                                    )}
+                                                </div>
                                             </div>
-                                        )}
+                                            );
+                                        })()}
                                         {/* Network */}
                                         {vmHwInfo?.net && (
                                             <div className="flex items-center gap-2 text-[12px]">
@@ -1705,7 +1812,7 @@
                                 <div className="space-y-4">
                                     {/* related objects */}
                                     <div style={{border: '1px solid #485764'}}>
-                                        <div className="px-3 py-2" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
+                                        <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                             <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('relatedObjects') || 'Related Objects'}</span>
                                         </div>
                                         <table className="corp-property-grid">
@@ -1722,7 +1829,7 @@
                                     {/* Guest Agent Info (if available) */}
                                     {isQemu && isRunning && guestInfo && (
                                         <div style={{border: '1px solid #485764'}}>
-                                            <div className="px-3 py-2" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
+                                            <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                                 <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('guestAgentInfo')}</span>
                                             </div>
                                             <table className="corp-property-grid">
@@ -1740,7 +1847,7 @@
 
                                     {/* HA config */}
                                     <div style={{border: '1px solid #485764'}}>
-                                        <div className="px-3 py-2 flex items-center justify-between" style={{background: '#22343c', borderBottom: '1px solid #485764'}}>
+                                        <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                             <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('proxmoxHa') || 'Proxmox HA'}</span>
                                             <button
                                                 onClick={toggleProxmoxHa}
@@ -1764,6 +1871,218 @@
                                     </div>
                                 </div>
                             </div>
+
+                            {/* LW: Mar 2026 - inline perf charts, no more modal for corporate view */}
+                            {isRunning && (
+                                <div style={{border: '1px solid #485764'}}>
+                                    <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>
+                                            {t('performanceMetrics') || 'Performance Metrics'}
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <select
+                                                value={metricsTimeframe}
+                                                onChange={e => setMetricsTimeframe(e.target.value)}
+                                                className="text-[11px] px-2 py-0.5"
+                                                style={{background: 'var(--corp-input-bg)', border: '1px solid var(--corp-border-medium)', color: '#e9ecef'}}
+                                            >
+                                                <option value="hour">1 {t('hour')}</option>
+                                                <option value="day">1 {t('day')}</option>
+                                                <option value="week">1 {t('week')}</option>
+                                                <option value="month">1 {t('month')}</option>
+                                                <option value="year">1 {t('year')}</option>
+                                            </select>
+                                            <button
+                                                onClick={() => setMetricsRefreshTick(t => t + 1)}
+                                                disabled={metricsLoading}
+                                                className="p-0.5 rounded hover:bg-white/10 transition-colors disabled:opacity-40"
+                                                title={t('refresh') || 'Refresh'}
+                                            >
+                                                <Icons.RotateCw className={`w-3.5 h-3.5 ${metricsLoading ? 'animate-spin' : ''}`} style={{color: '#728b9a'}} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="p-3">
+                                        {metricsLoading ? (
+                                            <div className="flex items-center justify-center py-6">
+                                                <Icons.RotateCw className="w-4 h-4 animate-spin" style={{color: '#728b9a'}} />
+                                            </div>
+                                        ) : metricsData?.metrics ? (
+                                            <div className="space-y-3">
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <LineChart data={metricsData.metrics.cpu} timestamps={metricsData.timestamps}
+                                                        label="CPU" color="#49afd9" unit="%" />
+                                                    <LineChart data={memDataGB} timestamps={metricsData.timestamps}
+                                                        label="Memory" color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
+                                                        formatValue={v => v.toFixed(2)} />
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <LineChart data={metricsData.metrics.disk_read} timestamps={metricsData.timestamps}
+                                                        label="Disk Read" color="#efc006" unit="/s" formatValue={formatBytes} />
+                                                    <LineChart data={metricsData.metrics.disk_write} timestamps={metricsData.timestamps}
+                                                        label="Disk Write" color="#f97316" unit="/s" formatValue={formatBytes} />
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <LineChart data={metricsData.metrics.net_in} timestamps={metricsData.timestamps}
+                                                        label="Network In" color="#49afd9" unit="/s" formatValue={formatBytes} />
+                                                    <LineChart data={metricsData.metrics.net_out} timestamps={metricsData.timestamps}
+                                                        label="Network Out" color="#8b5cf6" unit="/s" formatValue={formatBytes} />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="text-center py-4 text-[12px]" style={{color: '#728b9a'}}>
+                                                {t('noDataAvailable') || 'No data available'}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* NS: Mar 2026 - inline snapshots tab */}
+                    {activeDetailTab === 'snapshots' && (
+                        <div className="p-4 space-y-3">
+                            <div className="flex items-center justify-between mb-2">
+                                <h3 className="text-sm font-medium" style={{color: '#e9ecef'}}>
+                                    <Icons.Clock className="w-4 h-4 inline mr-1" />{t('snapshotsTab') || 'Snapshots'}
+                                </h3>
+                                <button onClick={() => setShowCreateSnap(!showCreateSnap)}
+                                    className="px-3 py-1.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30">
+                                    + {t('createSnapshot') || 'Create Snapshot'}
+                                </button>
+                            </div>
+
+                            {showCreateSnap && (
+                                <div className="p-3 rounded-lg" style={{background: 'var(--corp-surface-1, #1a2733)', border: '1px solid var(--corp-border-subtle, #283844)'}}>
+                                    <div className="space-y-2">
+                                        <input type="text" value={snapName} onChange={e => setSnapName(e.target.value)}
+                                            placeholder={t('snapshotName') || 'Snapshot name'}
+                                            className="w-full px-3 py-1.5 text-sm rounded bg-proxmox-dark border border-proxmox-border text-white" />
+                                        <input type="text" value={snapDesc} onChange={e => setSnapDesc(e.target.value)}
+                                            placeholder={t('description') || 'Description (optional)'}
+                                            className="w-full px-3 py-1.5 text-sm rounded bg-proxmox-dark border border-proxmox-border text-white" />
+                                        <div className="flex items-center justify-between">
+                                            {isQemu && isRunning && (
+                                                <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                                                    <input type="checkbox" checked={snapRam} onChange={e => setSnapRam(e.target.checked)} />
+                                                    {t('includeRam') || 'Include RAM'}
+                                                </label>
+                                            )}
+                                            <div className="flex gap-2 ml-auto">
+                                                <button onClick={() => setShowCreateSnap(false)}
+                                                    className="px-3 py-1 text-xs rounded text-gray-400 hover:text-white">
+                                                    {t('cancel')}
+                                                </button>
+                                                <button onClick={handleCreateSnap}
+                                                    className="px-3 py-1 text-xs rounded bg-proxmox-orange text-white hover:bg-proxmox-orange/80">
+                                                    {t('create') || 'Create'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {(() => {
+                                // build tree from parent field
+                                const buildSnapTree = (snaps) => {
+                                    const map = {};
+                                    const roots = [];
+                                    snaps.forEach(s => { map[s.name] = { ...s, children: [] }; });
+                                    snaps.forEach(s => {
+                                        if (s.parent && map[s.parent]) map[s.parent].children.push(map[s.name]);
+                                        else roots.push(map[s.name]);
+                                    });
+                                    return roots;
+                                };
+
+                                const renderSnapNode = (node, depth) => (
+                                    <React.Fragment key={node.name}>
+                                        <div className="p-2.5 rounded-lg flex items-center justify-between"
+                                            style={{marginLeft: depth * 20, background: 'var(--corp-surface-1, #1a2733)', border: '1px solid var(--corp-border-subtle, #283844)', marginBottom: 4}}>
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                {depth > 0 && <span className="text-xs" style={{color: '#49afd9', fontFamily: 'monospace'}}>└─</span>}
+                                                <div className="min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm font-medium truncate" style={{color: '#e9ecef'}}>{node.name}</span>
+                                                        {!!node.vmstate && <span className="px-1 py-0.5 text-[10px] rounded bg-blue-500/20 text-blue-400">RAM</span>}
+                                                        {node.disk_size > 0 && (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded" style={{background: 'rgba(255,255,255,0.05)', color: '#728b9a'}}>
+                                                                {(node.disk_size / (1024*1024*1024)).toFixed(1)} GB
+                                                                {!!node.vmstate && node.ram_size > 0 && ` + ${(node.ram_size / (1024*1024*1024)).toFixed(1)} GB RAM`}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-[11px]" style={{color: '#728b9a'}}>
+                                                        {node.snaptime ? new Date(node.snaptime * 1000).toLocaleString() : ''}
+                                                        {node.description && <span className="ml-2" style={{color: '#5a7a8a'}}>— {node.description}</span>}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-1 flex-shrink-0">
+                                                <button onClick={() => handleRollbackSnap(node.name)}
+                                                    className="p-1.5 rounded hover:bg-blue-500/20 text-blue-400" title={t('rollback')}>
+                                                    <Icons.RotateCcw className="w-3.5 h-3.5" />
+                                                </button>
+                                                <button onClick={() => handleDeleteSnap(node.name)}
+                                                    className="p-1.5 rounded hover:bg-red-500/20 text-red-400" title={t('delete')}>
+                                                    <Icons.Trash2 className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        {node.children.map(child => renderSnapNode(child, depth + 1))}
+                                    </React.Fragment>
+                                );
+
+                                if (snapsLoading) return <div className="text-center py-6 text-xs" style={{color: '#728b9a'}}>Loading...</div>;
+
+                                const stdSnaps = snapshots.filter(s => s.name !== 'current');
+                                const tree = buildSnapTree(stdSnaps);
+
+                                if (stdSnaps.length === 0 && efficientSnapshots.length === 0)
+                                    return <div className="text-center py-8 text-xs" style={{color: '#728b9a'}}>{t('noSnapshots') || 'No snapshots'}</div>;
+
+                                return (<>
+                                    {tree.map(root => renderSnapNode(root, 0))}
+
+                                    {efficientSnapshots.length > 0 && (<>
+                                        <div className="text-xs font-medium mt-4 mb-1" style={{color: '#49afd9'}}>
+                                            Efficient Snapshots (LVM COW)
+                                        </div>
+                                        {efficientSnapshots.map(snap => (
+                                            <div key={snap.id} className="p-2.5 rounded-lg flex items-center justify-between"
+                                                style={{background: 'var(--corp-surface-1, #1a2733)', border: '1px solid rgba(73,175,217,0.2)', marginBottom: 4}}>
+                                                <div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm font-medium" style={{color: '#e9ecef'}}>{snap.name}</span>
+                                                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-green-500/20 text-green-400">COW</span>
+                                                        {snap.fs_frozen && <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-500/20 text-blue-400">frozen</span>}
+                                                        {snap.total_snap_alloc_gb != null && (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded" style={{background: 'rgba(255,255,255,0.05)', color: '#728b9a'}}>
+                                                                {snap.total_snap_alloc_gb.toFixed(1)} GB
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-[11px]" style={{color: '#728b9a'}}>
+                                                        {snap.created ? new Date(snap.created).toLocaleString() : ''}
+                                                    </div>
+                                                </div>
+                                                <div className="flex gap-1">
+                                                    <button onClick={() => handleRollbackEfficientSnap(snap.id, snap.name)}
+                                                        className="p-1.5 rounded hover:bg-blue-500/20 text-blue-400" title={t('rollback')}>
+                                                        <Icons.RotateCcw className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    <button onClick={() => handleDeleteEfficientSnap(snap.id, snap.name)}
+                                                        className="p-1.5 rounded hover:bg-red-500/20 text-red-400" title={t('delete')}>
+                                                        <Icons.Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </>)}
+                                </>);
+                            })()}
                         </div>
                     )}
                 </div>
@@ -3133,19 +3452,19 @@
                 return (
                     <div className="space-y-3">
                         {/* Header */}
-                        <div className="flex items-center justify-between pb-2" style={{borderBottom: '1px solid #485764'}}>
+                        <div className="flex items-center justify-between pb-2" style={{borderBottom: '1px solid var(--corp-border-medium)'}}>
                             <div className="flex items-center gap-2">
                                 <Icons.Folder className="w-4 h-4" style={{color: group.color || '#E86F2D'}} />
-                                <h2 className="text-[15px] font-semibold" style={{color: '#e9ecef'}}>{group.name}</h2>
-                                <span className="text-[12px]" style={{color: '#728b9a'}}>{groupClusters.length} {t('clusters')}</span>
+                                <h2 className="text-[15px] font-semibold" style={{color: 'var(--color-text)'}}>{group.name}</h2>
+                                <span className="text-[12px]" style={{color: 'var(--corp-text-muted)'}}>{groupClusters.length} {t('clusters')}</span>
                             </div>
                             <div className="flex items-center gap-2">
                                 {totals.totalAlerts > 0 && (
-                                    <span className="text-[12px] flex items-center gap-1" style={{color: '#f54f47'}}>
+                                    <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-error)'}}>
                                         <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts}
                                     </span>
                                 )}
-                                <button onClick={onOpenSettings} className="p-1" style={{color: '#728b9a'}} title={t('settings')}>
+                                <button onClick={onOpenSettings} className="p-1" style={{color: 'var(--corp-text-muted)'}} title={t('settings')}>
                                     <Icons.Settings className="w-4 h-4" />
                                 </button>
                             </div>
@@ -3153,27 +3472,27 @@
 
                         {/* LB status compact */}
                         {lbEnabled && (
-                            <div className="flex items-center gap-3 px-2 py-1.5 text-[12px]" style={{background: '#22343c', border: '1px solid #485764'}}>
-                                <Icons.Scale className="w-3.5 h-3.5" style={{color: '#60b515'}} />
-                                <span style={{color: '#adbbc4'}}>{t('crossClusterLB') || 'Cross-Cluster LB'}: <span style={{color: '#60b515'}}>{t('enabled') || 'Enabled'}</span></span>
-                                {group.cross_cluster_dry_run && <span style={{color: '#efc006'}}>({t('simulationMode') || 'Simulation'})</span>}
-                                <span style={{color: '#728b9a'}}>Threshold: {group.cross_cluster_threshold || 30}%</span>
+                            <div className="flex items-center gap-3 px-2 py-1.5 text-[12px]" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                                <Icons.Scale className="w-3.5 h-3.5" style={{color: 'var(--color-success)'}} />
+                                <span style={{color: 'var(--corp-text-secondary)'}}>{t('crossClusterLB') || 'Cross-Cluster LB'}: <span style={{color: 'var(--color-success)'}}>{t('enabled') || 'Enabled'}</span></span>
+                                {group.cross_cluster_dry_run && <span style={{color: 'var(--color-warning)'}}>({t('simulationMode') || 'Simulation'})</span>}
+                                <span style={{color: 'var(--corp-text-muted)'}}>Threshold: {group.cross_cluster_threshold || 30}%</span>
                             </div>
                         )}
 
                         {/* Stats bar */}
-                        <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: '#22343c', border: '1px solid #485764'}}>
-                            <span style={{color: '#adbbc4'}}>{t('clusters')}: <b style={{color: '#e9ecef'}}>{totals.connectedClusters}/{totals.clusters}</b></span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>{t('nodes')}: <b style={{color: '#e9ecef'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>VMs: <b style={{color: '#60b515'}}>{totals.runningVms}</b> / <b style={{color: '#728b9a'}}>{totals.totalVms - totals.runningVms}</b></span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
+                        <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('clusters')}: <b style={{color: 'var(--color-text)'}}>{totals.connectedClusters}/{totals.clusters}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> / <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
                         </div>
 
                         {/* Cluster table */}
@@ -3217,7 +3536,7 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
+                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                         <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
                                                     </span>
                                                 </div>
@@ -3225,7 +3544,7 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
+                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                         <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
                                                     </span>
                                                 </div>
@@ -3233,7 +3552,7 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
+                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                         <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
                                                     </span>
                                                 </div>
@@ -3599,7 +3918,7 @@
 
         // LW: All Clusters Overview - GitHub Feature Request #16
         // added a bunch of stuff here - storage, sparklines, sorting etc
-        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], onSelectCluster, onSelectVm }) {
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, topologyOnly = false }) {
             const { t } = useTranslation();
             const { isCorporate } = useLayout();
             const [sortBy, setSortBy] = useState('name');
@@ -3912,12 +4231,15 @@
                         {/* LW: Mar 2026 - content header strip */}
                         <div className="corp-content-header">
                             <div className="flex items-center gap-2">
-                                <Icons.Grid className="w-4 h-4" style={{color: '#49afd9'}} />
-                                <span className="corp-header-title">{t('inventoryOverview') || t('allClustersOverview') || 'Inventory Overview'}</span>
+                                {topologyOnly
+                                    ? <Icons.Network className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
+                                    : <Icons.Grid className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
+                                }
+                                <span className="corp-header-title">{topologyOnly ? (t('topologyView') || 'Topology') : (t('inventoryOverview') || t('allClustersOverview') || 'Inventory Overview')}</span>
                             </div>
                             <div className="flex items-center gap-3">
                                 {totals.totalAlerts > 0 && (
-                                    <span className="text-[12px] flex items-center gap-1" style={{color: '#f54f47'}}>
+                                    <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-error)'}}>
                                         <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
                                     </span>
                                 )}
@@ -3925,31 +4247,31 @@
                         </div>
 
                         {/* stats bar */}
-                        <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: '#22343c', border: '1px solid #485764'}}>
-                            <span style={{color: '#adbbc4'}}>{t('clusters')}: <b style={{color: '#e9ecef'}}>{totals.connectedClusters}/{totals.clusters}</b> online</span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>{t('nodes')}: <b style={{color: '#e9ecef'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>VMs: <b style={{color: '#60b515'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: '#728b9a'}}>{totals.totalVms - totals.runningVms}</b> {t('stopped')?.toLowerCase()}</span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
-                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
+                        {!topologyOnly && <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('clusters')}: <b style={{color: 'var(--color-text)'}}>{totals.connectedClusters}/{totals.clusters}</b> online</span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: 'var(--corp-text-muted)'}}>{totals.totalVms - totals.runningVms}</b> {t('stopped')?.toLowerCase()}</span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
+                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
                                 <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgCpu, 100)}%`, background: corpBarColor(totals.avgCpu)}} />
                             </span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
-                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
+                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
                                 <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgMem, 100)}%`, background: corpBarColor(totals.avgMem)}} />
                             </span>
-                            <span style={{color: '#485764', margin: '0 8px'}}>|</span>
-                            <span style={{color: '#adbbc4'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
-                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative', verticalAlign: 'middle'}}>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
+                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
                                 <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgStorage, 100)}%`, background: corpBarColor(totals.avgStorage)}} />
                             </span>
-                        </div>
+                        </div>}
 
                         {/* cluster table */}
-                        <table className="corp-datagrid corp-datagrid-striped">
+                        {!topologyOnly && <table className="corp-datagrid corp-datagrid-striped">
                             <thead>
                                 <tr>
                                     {[
@@ -3980,19 +4302,19 @@
                                             <td style={{fontWeight: 500}}>{cluster.display_name || cluster.name}</td>
                                             <td>
                                                 <span className="inline-flex items-center gap-1.5">
-                                                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? '#60b515' : '#f54f47'}} />
-                                                    <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
+                                                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? 'var(--color-success)' : 'var(--color-error)'}} />
+                                                    <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
                                                 </span>
                                             </td>
                                             <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
                                             <td>
-                                                <span style={{color: '#60b515'}}>{cluster.runningVms}</span>
-                                                <span style={{color: '#728b9a'}}> / {cluster.totalVms - cluster.runningVms}</span>
+                                                <span style={{color: 'var(--color-success)'}}>{cluster.runningVms}</span>
+                                                <span style={{color: 'var(--corp-text-muted)'}}> / {cluster.totalVms - cluster.runningVms}</span>
                                             </td>
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
+                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                         <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
                                                     </span>
                                                 </div>
@@ -4000,7 +4322,7 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
+                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                         <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
                                                     </span>
                                                 </div>
@@ -4008,7 +4330,7 @@
                                             <td>
                                                 <div className="flex items-center gap-1.5">
                                                     <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: '#37474f', position: 'relative'}}>
+                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                         <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
                                                     </span>
                                                 </div>
@@ -4018,10 +4340,10 @@
                                     );
                                 })}
                             </tbody>
-                        </table>
+                        </table>}
 
                         {/* top resources */}
-                        {topGuests.length > 0 && (
+                        {!topologyOnly && topGuests.length > 0 && (
                             <div>
                                 <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid #485764'}}>
                                     <Icons.Activity className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
@@ -4060,7 +4382,7 @@
                                                     <td>
                                                         <div className="flex items-center gap-1.5">
                                                             <span style={{color: corpBarColor(cpuP), minWidth: '32px'}}>{cpuP}%</span>
-                                                            <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                            <span className="inline-block" style={{width: '40px', height: '2px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                                 <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cpuP, 100)}%`, background: corpBarColor(cpuP)}} />
                                                             </span>
                                                         </div>
@@ -4068,7 +4390,7 @@
                                                     <td>
                                                         <div className="flex items-center gap-1.5">
                                                             <span style={{color: corpBarColor(memP), minWidth: '32px'}}>{memP}%</span>
-                                                            <span className="inline-block" style={{width: '40px', height: '2px', background: '#37474f', position: 'relative'}}>
+                                                            <span className="inline-block" style={{width: '40px', height: '2px', background: 'var(--corp-divider)', position: 'relative'}}>
                                                                 <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(memP, 100)}%`, background: corpBarColor(memP)}} />
                                                             </span>
                                                         </div>
@@ -4087,9 +4409,198 @@
                             </div>
                         )}
 
+                        {/* NS: Mar 2026 - Multi-cluster topology redesign (#142) */}
+                        {clusters.filter(c => c.connected).length > 0 && (() => {
+                            const fmtMem = (b) => { if (!b) return '0'; const gb = b/(1024*1024*1024); return gb >= 1 ? `${gb.toFixed(1)}G` : `${(b/(1024*1024)).toFixed(0)}M`; };
+                            const barColor = (v) => v > 80 ? '#f54f47' : v > 60 ? '#efc006' : '#60b515';
+                            // MK: mini bar kept for fallback, donuts are primary now
+                            const MiniBar = ({pct, color}) => (
+                                <div style={{width: '60px', height: '3px', background: 'var(--corp-bar-track)', borderRadius: '1.5px', flexShrink: 0}}>
+                                    <div style={{width: `${Math.min(pct, 100)}%`, height: '3px', background: color, borderRadius: '1.5px', transition: 'width 0.3s'}} />
+                                </div>
+                            );
+                            const MiniDonut = ({pct, color, sz}) => {
+                                const r = (sz - 3) / 2, c = r * 2 * Math.PI;
+                                const off = c - (Math.min(pct, 100) / 100) * c;
+                                return (
+                                    <svg width={sz} height={sz} style={{transform:'rotate(-90deg)', flexShrink:0}}>
+                                        <circle cx={sz/2} cy={sz/2} r={r} fill="none" className="corp-donut-track" strokeWidth={3} />
+                                        <circle cx={sz/2} cy={sz/2} r={r} fill="none" stroke={color} strokeWidth={3}
+                                            strokeLinecap="round" strokeDasharray={c} strokeDashoffset={off} className="corp-donut-fill" />
+                                    </svg>
+                                );
+                            };
+                            return (
+                            <div>
+                                <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                    <Icons.Network className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
+                                    <span className="text-[13px] font-semibold" style={{color: 'var(--corp-text-secondary)'}}>{t('topologyView') || 'Topology'}</span>
+                                </div>
+                                <div className="mt-3 flex flex-wrap gap-5">
+                                    {clusters.filter(c => c.connected).map(cluster => {
+                                        const resources = allClusterGuests[cluster.id] || [];
+                                        const nodeMap = {};
+                                        resources.forEach(r => {
+                                            if (r.type !== 'qemu' && r.type !== 'lxc') return;
+                                            if (!nodeMap[r.node]) nodeMap[r.node] = { guests: [] };
+                                            nodeMap[r.node].guests.push(r);
+                                        });
+                                        const statusData = allMetrics[cluster.id]?.data || {};
+                                        const nodeEntries = Object.entries(nodeMap);
+                                        const clusterPbs = pbsServers.filter(p => p.linked_clusters?.includes(cluster.id) && p.status !== 'disconnected');
+                                        // LW: cluster-level avg stats for header donuts
+                                        const allGuests = Object.values(nodeMap).flatMap(n => n.guests);
+                                        const clAvgCpu = allGuests.length > 0 ? allGuests.reduce((s, g) => s + ((g.cpu || 0) * 100), 0) / allGuests.length : 0;
+                                        const clTotalMem = allGuests.reduce((s, g) => s + (g.mem || 0), 0);
+                                        const clTotalMaxMem = allGuests.reduce((s, g) => s + (g.maxmem || 0), 0);
+                                        const clMemPct = clTotalMaxMem > 0 ? (clTotalMem / clTotalMaxMem * 100) : 0;
+
+                                        return (
+                                            <div key={cluster.id} className="flex-1 min-w-[300px] max-w-[520px]" style={{
+                                                border: '1px solid var(--corp-border-medium)',
+                                                borderLeft: '3px solid var(--corp-accent)',
+                                                background: 'var(--corp-surface-0)',
+                                                boxShadow: 'var(--corp-shadow-sm)',
+                                                transition: 'box-shadow 0.15s, transform 0.15s'
+                                            }}
+                                            onMouseEnter={e => { e.currentTarget.style.boxShadow = 'var(--corp-shadow-md)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                                            onMouseLeave={e => { e.currentTarget.style.boxShadow = 'var(--corp-shadow-sm)'; e.currentTarget.style.transform = 'none'; }}
+                                            >
+                                                {/* cluster header */}
+                                                <div
+                                                    className="flex items-center gap-2 px-3 py-2.5 cursor-pointer"
+                                                    style={{borderBottom: '1px solid var(--corp-border-medium)', background: 'var(--corp-header-bg)'}}
+                                                    onClick={() => onSelectCluster(cluster)}
+                                                >
+                                                    <span className="w-2 h-2 rounded-full topo-status-glow" style={{background: 'var(--color-success)'}} />
+                                                    <Icons.Server className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
+                                                    <span className="text-[13px] font-semibold" style={{color: 'var(--color-text)'}}>{cluster.display_name || cluster.name}</span>
+                                                    <div className="flex items-center gap-2 ml-auto">
+                                                        {allGuests.length > 0 && (
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="flex items-center gap-1">
+                                                                    <MiniDonut pct={clAvgCpu} color={barColor(clAvgCpu)} sz={24} />
+                                                                    <span className="text-[9px] font-medium" style={{color: barColor(clAvgCpu)}}>{clAvgCpu.toFixed(0)}%</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-1">
+                                                                    <MiniDonut pct={clMemPct} color={barColor(clMemPct)} sz={24} />
+                                                                    <span className="text-[9px] font-medium" style={{color: barColor(clMemPct)}}>{clMemPct.toFixed(0)}%</span>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                        <span className="text-[10px]" style={{color: 'var(--corp-text-muted)'}}>
+                                                            {nodeEntries.length}N &middot; {allGuests.length}G
+                                                        </span>
+                                                    </div>
+                                                </div>
+
+                                                {/* node cards */}
+                                                <div className="p-3 space-y-2.5">
+                                                    {nodeEntries.map(([nodeName, nd]) => {
+                                                        const isOnline = true; // connected cluster = reachable
+                                                        const runG = nd.guests.filter(g => g.status === 'running').length;
+                                                        const totalGuestCpu = nd.guests.reduce((s, g) => s + ((g.cpu || 0) * 100), 0);
+                                                        const totalGuestMem = nd.guests.reduce((s, g) => s + (g.mem || 0), 0);
+                                                        const totalGuestMaxMem = nd.guests.reduce((s, g) => s + (g.maxmem || 0), 0);
+                                                        const avgCpu = nd.guests.length > 0 ? totalGuestCpu / nd.guests.length : 0;
+                                                        const memPct = totalGuestMaxMem > 0 ? (totalGuestMem / totalGuestMaxMem * 100) : 0;
+
+                                                        return (
+                                                            <div key={nodeName} style={{
+                                                                background: 'var(--corp-surface-1)',
+                                                                border: '1px solid var(--corp-border-medium)',
+                                                                borderLeft: `3px solid ${isOnline ? 'var(--color-success)' : 'var(--color-error)'}`,
+                                                                boxShadow: 'var(--corp-shadow-sm)',
+                                                            }}>
+                                                                <div className="flex items-center gap-2 px-3 py-2" style={{borderBottom: nd.guests.length ? '1px solid var(--corp-border-medium)' : 'none'}}>
+                                                                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0${isOnline ? ' topo-status-glow' : ''}`} style={{background: isOnline ? '#60b515' : '#f54f47'}} />
+                                                                    <Icons.Server className="w-3 h-3 flex-shrink-0" style={{color: isOnline ? 'var(--corp-text-secondary)' : '#f54f47'}} />
+                                                                    <span className="text-[12px] font-medium" style={{color: isOnline ? 'var(--color-text)' : '#f54f47'}}>{nodeName}</span>
+                                                                    {!isOnline && <span className="text-[9px] font-bold px-1.5 py-0.5" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
+                                                                    {isOnline && (
+                                                                        <div className="flex items-center gap-3 ml-auto">
+                                                                            <div className="flex items-center gap-1">
+                                                                                <MiniDonut pct={avgCpu} color={barColor(avgCpu)} sz={28} />
+                                                                                <span className="text-[10px] font-medium" style={{color: barColor(avgCpu)}}>{avgCpu.toFixed(0)}%</span>
+                                                                            </div>
+                                                                            <div className="flex items-center gap-1">
+                                                                                <MiniDonut pct={memPct} color={barColor(memPct)} sz={28} />
+                                                                                <span className="text-[10px] font-medium" style={{color: barColor(memPct)}}>{memPct.toFixed(0)}%</span>
+                                                                            </div>
+                                                                            <span className="text-[10px]" style={{color: 'var(--corp-text-muted)'}}>{runG}/{nd.guests.length}</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+
+                                                                {/* guest rows */}
+                                                                {nd.guests.length > 0 && (
+                                                                    <div className="py-1">
+                                                                        {nd.guests.sort((a,b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0) || a.vmid - b.vmid).map(g => (
+                                                                            <div key={g.vmid}
+                                                                                className="flex items-center gap-2 px-3 py-1 cursor-pointer"
+                                                                                style={{':hover': {background: 'rgba(255,255,255,0.03)'}}}
+                                                                                onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                                                                                onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                                                                                onClick={() => onSelectVm && onSelectVm(cluster, g.vmid, g.node)}
+                                                                            >
+                                                                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background: g.status === 'running' ? '#60b515' : 'var(--corp-text-muted)'}} />
+                                                                                {g.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
+                                                                                <span className="text-[11px] truncate" style={{color: g.status === 'running' ? 'var(--color-text)' : 'var(--corp-text-muted)', maxWidth: '130px'}}>
+                                                                                    {g.name || `${g.type === 'qemu' ? 'VM' : 'CT'} ${g.vmid}`}
+                                                                                </span>
+                                                                                <span className="text-[10px]" style={{color: 'var(--corp-text-muted)'}}>{g.vmid}</span>
+                                                                                <span className="text-[9px] px-1 rounded" style={{
+                                                                                    background: g.type === 'qemu' ? 'rgba(73,175,217,0.12)' : 'rgba(161,120,217,0.12)',
+                                                                                    color: g.type === 'qemu' ? '#49afd9' : '#a178d9'
+                                                                                }}>{g.type === 'qemu' ? 'VM' : 'LXC'}</span>
+                                                                                {g.status === 'running' && (
+                                                                                    <span className="ml-auto text-[10px] flex-shrink-0" style={{color: 'var(--corp-text-muted)'}}>
+                                                                                        {((g.cpu || 0) * 100).toFixed(0)}% &middot; {fmtMem(g.mem)}
+                                                                                    </span>
+                                                                                )}
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+
+                                                    {nodeEntries.length === 0 && (
+                                                        <div className="px-2 py-3 text-center text-[11px]" style={{color: 'var(--corp-text-muted)'}}>
+                                                            {t('loading') || 'Loading...'}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* PBS section */}
+                                                {clusterPbs.length > 0 && (
+                                                    <div className="px-3 pb-2.5 pt-0.5">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {clusterPbs.map(pbs => (
+                                                                <div key={pbs.id} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]" style={{
+                                                                    border: '1px dashed var(--color-success)',
+                                                                    borderRadius: '2px',
+                                                                    background: 'rgba(96,181,21,0.04)'
+                                                                }}>
+                                                                    <Icons.HardDrive className="w-3 h-3" style={{color: 'var(--color-success)'}} />
+                                                                    <span style={{color: 'var(--corp-text-secondary)'}}>{pbs.name || pbs.host}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            );
+                        })()}
+
                         {clusters.length === 0 && (
                             <div className="py-8 text-center text-[13px]" style={{color: '#728b9a'}}>
-                                <Icons.Server className="w-6 h-6 mx-auto mb-2" style={{color: '#485764'}} />
+                                <Icons.Server className="w-6 h-6 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
                                 {t('noClustersConfigured') || 'No clusters configured'}
                             </div>
                         )}
@@ -4369,6 +4880,7 @@
 
             // NS: Mar 2026 - native Proxmox replication per cluster (#103)
             const [nativeReplByCluster, setNativeReplByCluster] = useState({});
+            const [xclbRunning, setXclbRunning] = useState(false);
 
             // form state - init from group data
             // NS: field names must match DB column names exactly (cross_cluster_*)
@@ -4386,6 +4898,20 @@
                 cross_cluster_max_migrations: group.cross_cluster_max_migrations || 1,
                 cross_cluster_include_containers: group.cross_cluster_include_containers || false,
             });
+
+            const handleXclbBalanceNow = async () => {
+                if (xclbRunning) return;
+                setXclbRunning(true);
+                try {
+                    const res = await authFetch(`${API_URL}/cluster-groups/${group.id}/balance-now`, { method: 'POST' });
+                    if (res && res.ok) addToast(t('balanceNowStarted') || 'Cross-cluster balance check started');
+                    else {
+                        const data = res ? await res.json().catch(() => ({})) : {};
+                        addToast(data.error || 'Failed', 'error');
+                    }
+                } catch(e) { addToast('Balance check failed', 'error'); }
+                finally { setTimeout(() => setXclbRunning(false), 3000); }
+            };
 
             // Fetch storage/bridge lists from ALL clusters in group, compute intersection
             useEffect(() => {
@@ -4810,6 +5336,20 @@
 
                                     {form.cross_cluster_lb_enabled && (
                                         <div className="space-y-4">
+                                            {/* Balance now */}
+                                            <div className="flex justify-end">
+                                                <button
+                                                    onClick={handleXclbBalanceNow}
+                                                    disabled={xclbRunning}
+                                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                                >
+                                                    {xclbRunning
+                                                        ? React.createElement('span', {className: 'w-3.5 h-3.5 border-2 border-proxmox-orange/40 border-t-proxmox-orange rounded-full animate-spin'})
+                                                        : React.createElement(Icons.RefreshCw, {className: 'w-3.5 h-3.5'})
+                                                    }
+                                                    {t('balanceNow') || 'Balance Now'}
+                                                </button>
+                                            </div>
                                             {/* Dry run toggle */}
                                             <div className="flex items-center justify-between p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-lg">
                                                 <div className="flex items-center gap-2">
@@ -5451,21 +5991,21 @@
             const corpHealthColor = healthScore >= 80 ? '#60b515' : healthScore >= 60 ? '#60b515' : healthScore >= 40 ? '#efc006' : '#f54f47';
             if (isCorporate) {
                 return (
-                    <div className="p-3" style={{background: '#22343c', border: '1px solid #485764'}}>
-                        <h3 className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{color: '#728b9a'}}>{t('clusterHealth')}</h3>
+                    <div className="p-3" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                        <h3 className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{color: 'var(--corp-text-muted)'}}>{t('clusterHealth')}</h3>
                         <div className="flex items-center gap-4 flex-wrap">
                             <div className="flex items-center gap-2">
-                                <div className="w-20 h-2 overflow-hidden" style={{background: '#1b2a32', borderRadius: '1px'}}>
+                                <div className="w-20 h-2 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
                                     <div className="h-full" style={{width: `${healthScore}%`, backgroundColor: corpHealthColor, borderRadius: '1px'}}></div>
                                 </div>
-                                <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{healthScore.toFixed(0)}</span>
-                                <span className="text-[11px]" style={{color: '#728b9a'}}>{healthLabel}</span>
+                                <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{healthScore.toFixed(0)}</span>
+                                <span className="text-[11px]" style={{color: 'var(--corp-text-muted)'}}>{healthLabel}</span>
                             </div>
-                            <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('nodesOnline')}: <span style={{color: '#e9ecef'}}>{onlineNodes}/{nodes.length}</span></span>
-                            <span className="text-[12px]" style={{color: '#adbbc4'}}>CPU: <span style={{color: '#e9ecef'}}>{avgCpu.toFixed(1)}%</span></span>
-                            <span className="text-[12px]" style={{color: '#adbbc4'}}>RAM: <span style={{color: '#e9ecef'}}>{avgMem.toFixed(1)}%</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{t('nodesOnline')}: <span style={{color: 'var(--color-text)'}}>{onlineNodes}/{nodes.length}</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>CPU: <span style={{color: 'var(--color-text)'}}>{avgCpu.toFixed(1)}%</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>RAM: <span style={{color: 'var(--color-text)'}}>{avgMem.toFixed(1)}%</span></span>
                             {maintenanceNodes > 0 && (
-                                <span className="text-[12px] flex items-center gap-1" style={{color: '#efc006'}}>
+                                <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-warning)'}}>
                                     <Icons.Wrench className="w-3 h-3" /> {maintenanceNodes} {t('maintenance')}
                                 </span>
                             )}

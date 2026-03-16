@@ -181,7 +181,7 @@ def get_cluster_nodes(cluster_id):
 
     # Try to get live data
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/nodes"
         r = manager._create_session().get(url, timeout=10)
 
@@ -1029,6 +1029,11 @@ def update_ha_config(cluster_id):
         manager.ha_config['poison_pill_enabled'] = data['poison_pill_enabled']
     if 'strict_fencing' in data:
         manager.ha_config['strict_fencing'] = data['strict_fencing']
+
+    # PegaProx VM auto-recovery - LW Mar 2026
+    old_pegaprox_vmid = manager.ha_config.get('pegaprox_vmid', '')
+    if 'pegaprox_vmid' in data:
+        manager.ha_config['pegaprox_vmid'] = data['pegaprox_vmid']
     
     # Enable/disable HA if specified
     if 'enabled' in data:
@@ -1061,13 +1066,30 @@ def update_ha_config(cluster_id):
         'storage_heartbeat_timeout': manager.ha_config.get('storage_heartbeat_timeout', 30),
         'poison_pill_enabled': manager.ha_config.get('poison_pill_enabled', True),
         'strict_fencing': manager.ha_config.get('strict_fencing', False),
+        'pegaprox_vmid': manager.ha_config.get('pegaprox_vmid', ''),
     }
     
     save_config()
-    
+
+    # re-deploy self-fence agents if pegaprox_vmid changed
+    new_pegaprox_vmid = manager.ha_config.get('pegaprox_vmid', '')
+    if 'pegaprox_vmid' in data and str(old_pegaprox_vmid) != str(new_pegaprox_vmid) and manager.ha_config.get('self_fence_installed'):
+        def _reinstall():
+            try:
+                manager.logger.info(f"[HA] pegaprox_vmid changed ({old_pegaprox_vmid} -> {new_pegaprox_vmid}), re-deploying agents")
+                results = manager._ha_install_self_fence_on_all_nodes()
+                ok = sum(1 for v in results.values() if v)
+                manager.logger.info(f"[HA] agent redeploy: {ok}/{len(results)} nodes")
+                manager.ha_config['self_fence_nodes'] = [k for k, v in results.items() if v]
+                _save_ha_config_to_db(cluster_id, manager)
+            except Exception as e:
+                manager.logger.error(f"[HA] agent redeploy failed: {e}")
+        import threading
+        threading.Thread(target=_reinstall, daemon=True).start()
+
     user = getattr(request, 'session', {}).get('user', 'system')
     log_audit(user, 'ha.config_updated', f"HA configuration updated for cluster {manager.config.name}", cluster=manager.config.name)
-    
+
     return jsonify({
         'message': 'HA-Konfiguration gespeichert',
         'status': manager.get_ha_status()
@@ -1088,6 +1110,7 @@ def _save_ha_config_to_db(cluster_id: str, manager):
             ha_settings['self_fence_installed'] = manager.ha_config.get('self_fence_installed', False)
             ha_settings['self_fence_nodes'] = manager.ha_config.get('self_fence_nodes', [])
             ha_settings['node_agent_installed'] = manager.ha_config.get('node_agent_installed', {})
+            ha_settings['pegaprox_vmid'] = manager.ha_config.get('pegaprox_vmid', '')
             cluster['ha_settings'] = ha_settings
             db.save_cluster(cluster_id, cluster)
             logging.info(f"[HA] Persisted ha_config to database for {cluster_id}")
@@ -1252,7 +1275,7 @@ def create_proxmox_ha_group(cluster_id):
         return jsonify({'error': 'group and nodes required'}), 400
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/ha/groups"
         
         payload = {
@@ -1290,7 +1313,7 @@ def delete_proxmox_ha_group(cluster_id, group_name):
         return error
     
     try:
-        host = manager.current_host or manager.config.host
+        host = manager.host
         url = f"https://{host}:8006/api2/json/cluster/ha/groups/{group_name}"
         
         resp = manager._api_delete(url)
@@ -1390,9 +1413,9 @@ def remove_from_proxmox_ha_by_sid(cluster_id, sid):
             return jsonify({'error': f'Invalid VMID in sid: {sid}'}), 400
     else:
         return jsonify({'error': f'Invalid sid format: {sid}. Expected vm:VMID or ct:VMID'}), 400
-    
+
     result = mgr.remove_vm_from_proxmox_ha(vmid, vm_type)
-    
+
     if result['success']:
         usr = getattr(request, 'session', {}).get('user', 'system')
         log_audit(usr, 'ha.vm_removed', f"{vm_type.upper()} {vmid} removed from HA", cluster=mgr.config.name)
@@ -1401,4 +1424,23 @@ def remove_from_proxmox_ha_by_sid(cluster_id, sid):
         return jsonify(result), 400
 
 
+# LW: Mar 2026 - manual balance trigger (#149)
+@bp.route('/api/clusters/<cluster_id>/balance-now', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN], perms=['cluster.config'])
+def trigger_balance_now(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
 
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'Cluster not found'}), 404
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster not connected'}), 503
+
+    import gevent
+    gevent.spawn(mgr.run_balance_check, force=True)
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'balance.manual', f"Manual balance check triggered for {mgr.config.name}", cluster=mgr.config.name)
+
+    return jsonify({'message': 'Balance check started'})
