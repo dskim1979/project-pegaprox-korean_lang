@@ -1250,7 +1250,8 @@
                                                                     <circle cx={vm.type === 'qemu' ? 16 : 16} cy={-10} r={3}
                                                                         fill={vm.status === 'running' ? '#60b515' : '#728b9a'} />
                                                                     <text y={22} textAnchor="middle" fill="#e9ecef" fontSize="10">
-                                                                        {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 14)}
+                                                                        <title>{vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}</title>
+                                                                        {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 20)}{(vm.name || '').length > 20 ? '…' : ''}
                                                                     </text>
                                                                     <text y={33} textAnchor="middle" fill="#728b9a" fontSize="9">{vm.vmid}</text>
                                                                 </g>
@@ -1384,7 +1385,8 @@
                                         <circle cx={16} cy={-10} r={3}
                                             fill={vm.status === 'running' ? '#60b515' : '#728b9a'} />
                                         <text y={22} textAnchor="middle" fill="#e9ecef" fontSize="10">
-                                            {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 16)}
+                                            <title>{vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`}</title>
+                                            {(vm.name || `${vm.type === 'qemu' ? 'VM' : 'CT'} ${vm.vmid}`).substring(0, 20)}{(vm.name || '').length > 20 ? '…' : ''}
                                         </text>
                                         <text y={33} textAnchor="middle" fill="#728b9a" fontSize="9">{vm.vmid}</text>
                                     </g>
@@ -7404,7 +7406,7 @@
                                             )}
                                         </div>
                                         <div className="space-y-1.5">
-                                            {pbsServers.map(pbs => (
+                                            {pbsServers.filter(pbs => !selectedCluster || !pbs.linked_clusters?.length || pbs.linked_clusters.includes(selectedCluster.id)).map(pbs => (
                                                 <button
                                                     key={pbs.id}
                                                     onClick={() => { setSelectedPBS(pbs); setSelectedCluster(null); setSelectedVMware(null); setPbsActiveTab('dashboard'); setPbsSelectedStore(null); }}
@@ -9552,6 +9554,7 @@
                                                                                                         <th className="text-left p-2 pl-4">CVE</th>
                                                                                                         <th className="text-left p-2">{t('packageName') || 'Package'}</th>
                                                                                                         <th className="text-left p-2">{t('severity') || 'Severity'}</th>
+                                                                                                        <th className="text-left p-2">{t('firstDetected') || 'First Detected'}</th>
                                                                                                         <th className="text-left p-2">Status</th>
                                                                                                     </tr>
                                                                                                 </thead>
@@ -9576,9 +9579,18 @@
                                                                                                                     {cve.urgency}
                                                                                                                 </span>
                                                                                                             </td>
+                                                                                                            <td className="p-2 text-xs text-gray-400">
+                                                                                                                {cve.first_seen ? new Date(cve.first_seen).toLocaleDateString() : '-'}
+                                                                                                            </td>
                                                                                                             <td className="p-2">
-                                                                                                                <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
-                                                                                                                    {t('fixAvailable') || 'fix available'}
+                                                                                                                <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                                                                                                    cve.fix_type === 'apt' ? 'bg-green-500/20 text-green-400' :
+                                                                                                                    cve.fix_type === 'pve_upgrade' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                                                                                    'bg-gray-500/20 text-gray-400'
+                                                                                                                }`}>
+                                                                                                                    {cve.fix_type === 'apt' ? (t('fixAvailable') || 'fix available') :
+                                                                                                                     cve.fix_type === 'pve_upgrade' ? 'PVE upgrade' :
+                                                                                                                     (t('noFix') || 'no fix')}
                                                                                                                 </span>
                                                                                                             </td>
                                                                                                         </tr>
@@ -10355,7 +10367,7 @@
                                                                 const cl = clusters.find(c => c.id === cid);
                                                                 return cl ? (
                                                                     <button key={cid} onClick={() => { setSelectedCluster(cl); setSelectedPBS(null); }} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-proxmox-orange/30 transition-all flex items-center gap-2">
-                                                                        <Icons.Server className="w-4 h-4 text-proxmox-orange" />{cl.name}
+                                                                        <Icons.Server className="w-4 h-4 text-proxmox-orange" />{cl.display_name || cl.name}
                                                                     </button>
                                                                 ) : null;
                                                             })}
@@ -12858,7 +12870,7 @@
                                                                 setPbsForm(p => ({...p, linked_clusters: e.target.checked ? [...linked, cl.id] : linked.filter(id => id !== cl.id)}));
                                                             }} className="rounded border-proxmox-border" />
                                                             <Icons.Server className="w-4 h-4 text-proxmox-orange" />
-                                                            <span className="text-sm text-gray-300">{cl.name}</span>
+                                                            <span className="text-sm text-gray-300">{cl.display_name || cl.name}</span>
                                                         </label>
                                                     ))}
                                                 </div>

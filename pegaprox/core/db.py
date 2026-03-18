@@ -1164,6 +1164,27 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating site_recovery tables: {e}")
 
+        # cve history - MK Mar 2026
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cve_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    cve_id TEXT NOT NULL,
+                    package TEXT,
+                    severity TEXT,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    resolved_at TEXT,
+                    UNIQUE(cluster_id, node, cve_id)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_cve_history_cluster_node ON cve_history(cluster_id, node)')
+            logging.info("Ensured cve_history table exists")
+        except Exception as e:
+            logging.error(f"Error creating cve_history table: {e}")
+
         conn.commit()
         logging.info("DB schema initialized")
     
@@ -3335,6 +3356,33 @@ class PegaProxDB:
         )
         rows = cursor.fetchall()
         return [self._row_to_efficient_snapshot(row) for row in rows]
+
+    # MK Mar 2026 - CVE tracking for scanner improvements
+    def upsert_cve(self, cluster_id, node, cve_id, package, severity):
+        now = datetime.now().isoformat()
+        self.execute('''INSERT INTO cve_history (cluster_id, node, cve_id, package, severity, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_id, node, cve_id) DO UPDATE SET
+            last_seen = ?, package = ?, severity = ?''',
+            (cluster_id, node, cve_id, package, severity, now, now, now, package, severity))
+
+    def get_cve_first_seen(self, cluster_id, node, cve_id):
+        row = self.query_one('SELECT first_seen FROM cve_history WHERE cluster_id = ? AND node = ? AND cve_id = ?',
+            (cluster_id, node, cve_id))
+        return row['first_seen'] if row else None
+
+    def mark_cves_resolved(self, cluster_id, node, active_cve_ids):
+        """Mark CVEs as resolved if they no longer show up in scan."""
+        now = datetime.now().isoformat()
+        if active_cve_ids:
+            placeholders = ','.join(['?'] * len(active_cve_ids))
+            self.execute(f'''UPDATE cve_history SET resolved_at = ?
+                WHERE cluster_id = ? AND node = ? AND resolved_at IS NULL
+                AND cve_id NOT IN ({placeholders})''',
+                [now, cluster_id, node] + list(active_cve_ids))
+        else:
+            self.execute('UPDATE cve_history SET resolved_at = ? WHERE cluster_id = ? AND node = ? AND resolved_at IS NULL',
+                (now, cluster_id, node))
 
     def _row_to_efficient_snapshot(self, row) -> dict:
         return {

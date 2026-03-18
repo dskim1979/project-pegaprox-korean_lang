@@ -11552,6 +11552,27 @@ echo "AGENT_INSTALLED_OK"
                     'security': is_security, 'severity': severity
                 })
 
+        # NS: Track CVE history + determine fix type
+        try:
+            from pegaprox.core.db import get_db
+            db = get_db()
+            available_updates = {p['name'] for p in result['packages']}
+            active_cve_ids = set()
+            for cve in result['cves']:
+                db.upsert_cve(self.id, node_name, cve['cve'], cve.get('package', ''), cve.get('urgency', 'medium'))
+                active_cve_ids.add(cve['cve'])
+                first_seen = db.get_cve_first_seen(self.id, node_name, cve['cve'])
+                cve['first_seen'] = first_seen
+                # fix type heuristic
+                pkg = cve.get('package', '')
+                if pkg.startswith('pve-') or pkg.startswith('proxmox-'):
+                    cve['fix_type'] = 'apt' if pkg in available_updates else 'pve_upgrade'
+                else:
+                    cve['fix_type'] = 'apt' if pkg in available_updates else 'none'
+            db.mark_cves_resolved(self.id, node_name, active_cve_ids)
+        except Exception as e:
+            self.logger.warning(f"[CVE] History tracking error: {e}")
+
         result['cve_count'] = len(result['cves'])
         result['total_count'] = len(result['packages'])
         result['security_count'] = sum(1 for p in result['packages'] if p['security'])
