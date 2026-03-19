@@ -36,6 +36,7 @@ assignees: ''
 - **OS:** <!-- e.g. Debian 12, Ubuntu 24.04 -->
 - **Browser:** <!-- e.g. Firefox 125, Chrome 122 -->
 - **Behind Reverse Proxy?** <!-- No / nginx / Traefik / Caddy / Cloudflare Tunnel / Other -->
+- **UI?** <!-- Corporate / Modern Layout -->
 
 ## Logs
 <!-- Paste relevant log output here -->
