@@ -541,7 +541,6 @@
         function SponsorSlot({ num }) {
             const { t } = useTranslation();
             const [hasImage, setHasImage] = useState(true);
-            const [sponsorUrl, setSponsorUrl] = useState(null);
             
             // Sponsor URLs - edit these to add sponsor links
             const sponsorLinks = {
@@ -560,13 +559,20 @@
             };
             
             const url = sponsorLinks[num];
+            const isEmptySlot = url === null;
             const imageSrc = `/images/sponsors/sponsor${num}.png`;
+<<<<<<< HEAD
             
-            if (!hasImage) {
+            if (!hasImage || !url) {
+                // Show "Wanted" placeholder when image failed to load or sponsor slot is empty
+=======
+
+            if (!hasImage || isEmptySlot) {
                 // Show "Wanted" placeholder
+>>>>>>> b655fc6 (fix: skip sponsor image load for empty slots to avoid 404 console errors)
                 return(
-                    <a 
-                        href="mailto:sponsor@pegaprox.com?subject=Sponsorship%20Inquiry" 
+                    <a
+                        href="mailto:sponsor@pegaprox.com?subject=Sponsorship%20Inquiry"
                         className="group"
                         title={t('becomeSponsor') || 'Become a sponsor'}
                     >
@@ -576,7 +582,7 @@
                     </a>
                 );
             }
-            
+
             const content = (
                 <div className="w-12 h-12 rounded-lg bg-proxmox-card border border-proxmox-border p-1 flex items-center justify-center hover:border-proxmox-orange/50 transition-all hover:scale-105 overflow-hidden">
                     <img 
