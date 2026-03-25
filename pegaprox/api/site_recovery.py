@@ -18,6 +18,24 @@ from pegaprox.api.helpers import check_cluster_access
 bp = Blueprint('site_recovery', __name__)
 
 
+# #225: wrap greenlet spawns so a crash sets plan status to 'failed' instead of stuck 'running'
+def _safe_spawn_failover(func, plan_id, *args):
+    import gevent
+    def _wrapper():
+        try:
+            func(plan_id, *args)
+        except Exception as e:
+            logging.error(f"[SR] Background task crashed for plan {plan_id}: {e}")
+            try:
+                db = get_db()
+                db.execute("UPDATE site_recovery_plans SET status = 'failed', updated_at = ? WHERE id = ?",
+                           (datetime.utcnow().isoformat(), plan_id))
+            except Exception:
+                pass
+    gevent.spawn(_wrapper)
+
+
+
 # ---- helpers ----
 
 def _get_plan(plan_id):
@@ -378,8 +396,7 @@ def execute_planned_failover(plan_id):
         return jsonify({'error': 'No VMs in plan'}), 400
 
     from pegaprox.background.site_recovery import execute_failover
-    import gevent
-    gevent.spawn(execute_failover, plan_id, 'planned')
+    _safe_spawn_failover(execute_failover, plan_id, 'planned')
 
     db = get_db()
     now = datetime.utcnow().isoformat()
@@ -410,8 +427,7 @@ def execute_emergency_failover(plan_id):
         return jsonify({'error': 'No VMs in plan'}), 400
 
     from pegaprox.background.site_recovery import execute_failover
-    import gevent
-    gevent.spawn(execute_failover, plan_id, 'emergency')
+    _safe_spawn_failover(execute_failover, plan_id, 'emergency')
 
     db = get_db()
     now = datetime.utcnow().isoformat()
@@ -437,8 +453,7 @@ def execute_test_failover(plan_id):
         return jsonify({'error': 'Target cluster not reachable'}), 503
 
     from pegaprox.background.site_recovery import execute_test_failover
-    import gevent
-    gevent.spawn(execute_test_failover, plan_id)
+    _safe_spawn_failover(execute_test_failover, plan_id)
 
     db = get_db()
     now = datetime.utcnow().isoformat()
@@ -458,8 +473,7 @@ def cleanup_test_failover(plan_id):
         return jsonify({'error': 'Plan not found'}), 404
 
     from pegaprox.background.site_recovery import cleanup_test
-    import gevent
-    gevent.spawn(cleanup_test, plan_id)
+    _safe_spawn_failover(cleanup_test, plan_id)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'site_recovery.test_cleanup', f"Test cleanup started: {plan['name']}")
@@ -486,8 +500,7 @@ def execute_failback(plan_id):
         return jsonify({'error': 'Current cluster (original target) not reachable'}), 503
 
     from pegaprox.background.site_recovery import execute_failover
-    import gevent
-    gevent.spawn(execute_failover, plan_id, 'failback')
+    _safe_spawn_failover(execute_failover, plan_id, 'failback')
 
     db = get_db()
     now = datetime.utcnow().isoformat()

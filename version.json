@@ -1,7 +1,7 @@
 {
-    "version": "0.9.3",
-    "build": "2026.03.22",
-    "release_date": "2026-03-22",
+    "version": "0.9.3.1",
+    "build": "2026.03.25",
+    "release_date": "2026-03-25",
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
     "update_archive": "https://github.com/PegaProx/project-pegaprox/archive/refs/heads/main.tar.gz",
@@ -175,56 +175,11 @@
         "Change auto-migrate default to disabled for new clusters (#136)",
         "XCP-ng feature parity: RRD metrics, guest IPs, pool HA, PIFs"
     ],
-    "changelog_0921": [
-        "fix: cross-cluster replication clone API parameter target→storage (#192)",
-        "fix: Docker SSH — add openssh-client + sshpass for CVE scanner & hardening (#175)",
-        "fix: ESXi migration uses wrong node IP on multi-homed nodes (#132)",
-        "fix: PBS backup snapshots not loading on large datastores (#143)",
-        "fix: VM backups tab infinite loading spinner (#143)",
-        "fix: placeholder text contrast for OIDC/LDAP settings (#170)",
-        "fix: missing files in update_files causing upgrade crash (#172)",
-        "fix: rolling update log phase name apt_upgrade→apt_dist_upgrade (#178)",
-        "fix: support zip missing cluster logs + IP redaction (#182)",
-        "fix: rolling update status not refreshed after completion (#183)",
-        "fix: migration false failure on WARNINGS exit status (#184)",
-        "fix: Top Resources click navigates to host instead of VM (#190)",
-        "fix: CDN SRI hash mismatch — pinned React/Babel/Chart.js versions (#206)",
-        "fix: auto-failover toggle CSS rendering in site recovery",
-        "fix: login background file size validation (PR #195)",
-        "fix: sponsor image 404 console errors (PR #203)",
-        "fix: site recovery audit logging gaps (8 missing operations)",
-        "feat: French translations by @IMNotMax (PR #186)",
-        "feat: @IMNotMax added to About credits",
-        "feat: topology view snapshot freeze (prevents SSE re-layout)"
-    ],
-    "changelog_0922": [
-        "fix: sponsor section visible in both Corporate and Modern layout"
-    ],
-    "changelog_093": [
-        "feat: plugin system — auto-discover, enable/disable, runtime loading, plugin API",
-        "feat: pool exclusion from auto-balancing (#exclude pools like VMs/nodes)",
-        "feat: migration tolerance/hysteresis — deadband + 15min VM cooldown to prevent ping-pong",
-        "feat: storage cluster tolerance — per-storage-cluster deadband for storage balancing",
-        "feat: CVE scanner PNG + PDF export",
-        "feat: backup schedule editing (#207)",
-        "feat: custom role editing (#167)",
-        "feat: @FernandoRD added to About credits (Portuguese)",
-        "fix: cross-cluster replication clone uses target storage on source cluster (#192)",
-        "fix: CVE scanner / hardening SSH fails on failover node — wrong IP (#199)",
-        "fix: SMBIOS status-all random SSH failures — skip offline nodes (#198)",
-        "fix: PBS VM backups not showing for linked PBS (#143)",
-        "fix: login background upload 403 behind reverse proxy — CSRF check (#210)",
-        "fix: rolling update log vanishes during node reboot (#179)",
-        "fix: rolling update confirmation shows wrong node count (#180)",
-        "fix: migration false failure on WARNINGS exit status (#184)",
-        "fix: Ceph panel not rendering on PVE 9 + Ceph Squid — multi-node fallback (#191)",
-        "fix: OIDC PKCE support for Authentik (#188)",
-        "fix: reverse proxy WebSocket port reuse for VNC/SSH (PR #173)",
-        "fix: nginx.conf example updated with correct WebSocket URL patterns",
-        "fix: support bundle deque for large logs — prevents OOM on 700MB+ log dirs",
-        "fix: custom role name not persisted — name/ID conflation (#167)",
-        "fix: cluster icon stays Database when offline (only color changes)",
-        "fix: corporate overview Cluster Storage shows all datastores (shared + local)"
+    "changelog": [
+        "fix: CRITICAL — user accounts wiped on restart with OIDC/LDAP users (#224)",
+        "fix: site recovery failover greenlet crash handler — prevents stuck 'running' status (#225)",
+        "fix: CVE scanner empty results on PVE 9 Trixie — suite detection fallback",
+        "fix: docs — wrong VNC/SSH WebSocket paths in nginx + Traefik config (#221)"
     ],
     "breaking_changes": []
 }

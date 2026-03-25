@@ -1308,7 +1308,8 @@ class PegaProxDB:
         
         if not needs_user_remigration:
             try:
-                cursor.execute("SELECT username, password_salt FROM users LIMIT 1")
+                # #224: only check local users — OIDC/LDAP users have no salt by design
+                cursor.execute("SELECT username, password_salt FROM users WHERE auth_source = 'local' OR auth_source IS NULL LIMIT 1")
                 row = cursor.fetchone()
                 if row:
                     salt = row[1] if len(row) > 1 else None
