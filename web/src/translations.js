@@ -11826,6 +11826,16 @@
                 trustedProxiesHint: "IPs/CIDRs separados por comas. Vacío = solo loopback (127.0.0.1). Ejemplo: 10.0.0.1, 172.16.0.0/12",
                 upToDate: "Actualizado",
 
+                renameHint: "Deje vacío para restablecer al nombre original",
+                autoFailoverDesc: "Failover automático por error ante caída del clúster",
+                everyMinute: "Cada minuto",
+                applySelected: "Aplicar seleccionados",
+                alreadyApplied: "Ya aplicado",
+                applied: "Aplicado",
+                every6Hours: "Cada 6 horas",
+                renameCluster: "Renombrar clúster",
+                allPkgsUpToDate: "Todos los paquetes están actualizados",
+                applying: "Aplicando...",
             },
             pt: {
                 // Geral
