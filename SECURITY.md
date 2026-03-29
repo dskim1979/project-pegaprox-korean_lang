@@ -74,7 +74,7 @@ PegaProx implements the following security measures:
 - **Transport security:** HTTPS is enforced for all production deployments
 - **Session management:** Tokens expire automatically after inactivity
 - **Brute-force protection:** Rate limiting is applied to authentication endpoints
-- **Role-based access control:** Three-tier permission model (Admin, Operator, Viewer)
+- **Role-based access control:** Permission models 
 - **VM-level ACLs:** Fine-grained per-VM permissions for multi-tenant environments
 - **Audit logging:** All user actions are logged for accountability
 
@@ -92,7 +92,7 @@ We consider security research conducted in accordance with this policy to be:
 - **Exempt** from restrictions in our terms of service that would interfere with conducting security research, and we waive those restrictions on a limited basis for work done under this policy
 - **Lawful**, helpful, and conducted in the overall interest of the security of the internet
 
-You are expected, as always, to comply with all applicable laws. If at any point you have concerns or are uncertain whether your security research is consistent with this policy, please reach out to us at [security@pegaprox.com](mailto:security@pegaprox.com) before going any further.
+You are expected, as always, to comply with all applicable laws. If at any point you have concerns or are uncertain whether your security research is consistent with this policy, please reach out to us at [support@pegaprox.com](mailto:support@pegaprox.com) before going any further.
 
 ## Best Practices for Users
 
@@ -110,8 +110,6 @@ To keep your PegaProx installation secure:
 ## Contact
 
 For security-related inquiries: **[support@pegaprox.com](mailto:support@pegaprox.com)**
-
-For general support: **[support@pegaprox.com](mailto:support@pegaprox.com)**
 
 ---
 
