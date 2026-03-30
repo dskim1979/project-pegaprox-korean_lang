@@ -2466,23 +2466,126 @@ rescan:'Reescanear',rescanningStorage:'Reescaneando armazenamento...',storageRes
 apply:'Aplicar',back:'Voltar',confirm:'Confirmar',ok:'OK',info:'Info',refresh:'Atualizar',swap:'Swap',server:'Servidor',admin:'Admin',options:'Opções',previous:'Anterior',issuer:'Emissor',datastores:'Datastores',notInstalled:'Não instalado',diskResized:'Disco redimensionado',selectBackup:'Selecionar backup',serialType:'Tipo serial',addReplication:'Adicionar replicação',passwordsDoNotMatch:'As senhas não correspondem',scheduleDay:'Dia do agendamento',privateKey:'Chave Privada',enable2NodeMode:'Ativar modo 2 nós',twoNodeModeDesc:'Modo de alta disponibilidade para clusters com apenas 2 nós',tenantAutoHint:'Atribuir automaticamente novos clusters a este tenant',// PegaProx Recommendations
 pegaApparmor:'AppArmor (Controle de Acesso Obrigatório)',pegaApparmorDesc:'Ativa o AppArmor e aplica todos os perfis. Restringe o que programas podem acessar mesmo se comprometidos — camada de segurança além das permissões padrão.',pegaApparmorImpact:'Nenhum para PVE padrão — serviços customizados podem precisar de perfis',pegaDisableSvc:'Desativar Serviços Desnecessários',pegaDisableSvcDesc:'Para e desativa bluetooth, CUPS (impressão) e Avahi (mDNS). Menos serviços = menor superfície de ataque.',pegaDisableSvcImpact:'Sem impressão local ou Bluetooth — irrelevante para servidores',pegaSysctl:'Sysctl Rede & Kernel Hardening',pegaSysctlDesc:'Aplica 20+ parâmetros sysctl: proteção contra IP spoofing, bloqueio de ICMP redirect, defesa contra SYN flood, ASLR, restrição dmesg, escopo ptrace, proteção de symlink.',pegaSysctlImpact:'Nenhum — hardening padrão para servidores de produção',pegaAuditd:'Ativar Daemon de Auditoria (auditd)',pegaAuditdDesc:'Instala e ativa o auditd para registro de eventos do sistema. Combine com STIG "Privileged Command Logging" para regras de auditoria completas.',pegaAuditdImpact:'Overhead mínimo — pré-requisito para regras de auditoria',// Password History
 lynPwHistory:'Histórico de Senhas',lynPwHistoryDesc:'Impede reutilização das últimas 24 senhas via pam_pwhistory.',lynPwHistoryImpact:'Usuários não podem reutilizar senhas recentes'}};// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
 // PegaProx - Contexts
 // LanguageContext + AuthContext providers
 // ═══════════════════════════════════════════════
 // Language Context
 // LW: Default is German (de) since thats what we use internally
-const LanguageContext=createContext();function LanguageProvider({children}){// Persist language preference in localStorage
-const[language,setLanguage]=useState(()=>{const saved=localStorage.getItem('pegaprox-language');return saved||'de';// German default
-});// Translation function with English fallback
-const t=useCallback(key=>{return translations[language]?.[key]||translations['en']?.[key]||key;},[language]);const changeLanguage=useCallback(lang=>{setLanguage(lang);localStorage.setItem('pegaprox-language',lang);// persist to server so other devices pick it up
-fetch(`${API_URL}/user/preferences`,{method:'PUT',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:lang})}).catch(()=>{});// fire and forget
-});// applyLanguage just sets state+localStorage without API call (used on login/session restore)
-const applyLanguage=useCallback(lang=>{setLanguage(lang);localStorage.setItem('pegaprox-language',lang);},[]);return/*#__PURE__*/React.createElement(LanguageContext.Provider,{value:{language,t,changeLanguage,applyLanguage}},children);}function useTranslation(){return useContext(LanguageContext);}// Language Switcher Component
-function LanguageSwitcher(){const{language,changeLanguage}=useTranslation();const{isCorporate}=useLayout();const langs=[{code:'de',flag:'🇦🇹',label:'DE',title:'Deutsch'},{code:'en',flag:'🇬🇧',label:'EN',title:'English'},{code:'fr',flag:'🇫🇷',label:'FR',title:'Français'},{code:'es',flag:'🇪🇸',label:'ES',title:'Español (LATAM)'},{code:'pt',flag:'🇧🇷',label:'PT',title:'Português'}];const activeLanguage=langs.find(l=>l.code===language)||langs[0];if(isCorporate){return/*#__PURE__*/React.createElement("div",{className:"flex items-center gap-2 border border-proxmox-border px-2 py-1.5",style:{background:'var(--corp-surface-1)'}},/*#__PURE__*/React.createElement("span",{className:"text-base leading-none","aria-hidden":"true"},activeLanguage.flag),/*#__PURE__*/React.createElement("select",{value:language,onChange:e=>changeLanguage(e.target.value),className:"bg-transparent text-xs text-gray-200 border-0 p-0 pr-6 focus:ring-0 focus:outline-none","aria-label":"Select language",title:activeLanguage.title},langs.map(l=>/*#__PURE__*/React.createElement("option",{key:l.code,value:l.code},l.label," - ",l.title))));}return/*#__PURE__*/React.createElement("div",{className:"flex items-center gap-1 bg-proxmox-dark rounded-lg p-1 border border-proxmox-border"},langs.map(l=>/*#__PURE__*/React.createElement("button",{key:l.code,onClick:()=>!l.soon&&changeLanguage(l.code),className:`flex items-center gap-1 px-1.5 py-1 rounded text-sm transition-all ${language===l.code?'bg-proxmox-orange text-white':l.soon?'text-gray-600 cursor-not-allowed':'text-gray-400 hover:text-white'}`,title:l.title,disabled:l.soon},/*#__PURE__*/React.createElement("span",{className:`text-base ${l.soon?'opacity-50':''}`},l.flag),/*#__PURE__*/React.createElement("span",{className:"hidden sm:inline text-xs"},l.label))));}// ============================================
+const LanguageContext = createContext();
+
+function LanguageProvider({ children }) {
+    // Persist language preference in localStorage
+    const [language, setLanguage] = useState(() => {
+        const saved = localStorage.getItem('pegaprox-language');
+        return saved || 'de'; // German default
+    });
+
+    // Translation function with English fallback
+    const t = useCallback(key => {
+        return translations[language]?.[key] || translations['en']?.[key] || key;
+    }, [language]);
+
+    const changeLanguage = useCallback(lang => {
+        setLanguage(lang);
+        localStorage.setItem('pegaprox-language', lang);
+        // persist to server so other devices pick it up
+        fetch(`${API_URL}/user/preferences`, {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: lang })
+        }).catch(() => {}); // fire and forget
+    });
+
+    // applyLanguage just sets state+localStorage without API call (used on login/session restore)
+    const applyLanguage = useCallback(lang => {
+        setLanguage(lang);
+        localStorage.setItem('pegaprox-language', lang);
+    }, []);
+
+    return /*#__PURE__*/ React.createElement(LanguageContext.Provider, {
+        value: { language, t, changeLanguage, applyLanguage }
+    }, children);
+}
+
+function useTranslation() {
+    return useContext(LanguageContext);
+}
+
+// Language Switcher Component
+function LanguageSwitcher() {
+    const { language, changeLanguage } = useTranslation();
+    const { isCorporate } = useLayout();
+    
+    // ✅ 한국어 (ko) 추가됨
+    const langs = [
+        { code: 'de', flag: '🇦🇹', label: 'DE', title: 'Deutsch' },
+        { code: 'en', flag: '🇬🇧', label: 'EN', title: 'English' },
+        { code: 'fr', flag: '🇫🇷', label: 'FR', title: 'Français' },
+        { code: 'es', flag: '🇪🇸', label: 'ES', title: 'Español (LATAM)' },
+        { code: 'pt', flag: '🇧🇷', label: 'PT', title: 'Português' },
+        { code: 'ko', flag: '🇰🇷', label: 'KO', title: '한국어' }  // ← 추가
+    ];
+    
+    const activeLanguage = langs.find(l => l.code === language) || langs[0];
+    
+    if (isCorporate) {
+        return /*#__PURE__*/ React.createElement("div", {
+            className: "flex items-center gap-2 border border-proxmox-border px-2 py-1.5",
+            style: { background: 'var(--corp-surface-1)' }
+        },
+            /*#__PURE__*/ React.createElement("span", {
+                className: "text-base leading-none",
+                "aria-hidden": "true"
+            }, activeLanguage.flag),
+            /*#__PURE__*/ React.createElement("select", {
+                value: language,
+                onChange: e => changeLanguage(e.target.value),
+                className: "bg-transparent text-xs text-gray-200 border-0 p-0 pr-6 focus:ring-0 focus:outline-none",
+                "aria-label": "Select language",
+                title: activeLanguage.title
+            }, langs.map(l =>
+                /*#__PURE__*/ React.createElement("option", {
+                    key: l.code,
+                    value: l.code
+                }, l.label, " - ", l.title)
+            ))
+        );
+    }
+    
+    return /*#__PURE__*/ React.createElement("div", {
+        className: "flex items-center gap-1 bg-proxmox-dark rounded-lg p-1 border border-proxmox-border"
+    }, langs.map(l =>
+        /*#__PURE__*/ React.createElement("button", {
+            key: l.code,
+            onClick: () => !l.soon && changeLanguage(l.code),
+            className: `flex items-center gap-1 px-1.5 py-1 rounded text-sm transition-all ${
+                language === l.code 
+                    ? 'bg-proxmox-orange text-white' 
+                    : l.soon 
+                        ? 'text-gray-600 cursor-not-allowed' 
+                        : 'text-gray-400 hover:text-white'
+            }`,
+            title: l.title,
+            disabled: l.soon
+        },
+            /*#__PURE__*/ React.createElement("span", {
+                className: `text-base ${l.soon ? 'opacity-50' : ''}`
+            }, l.flag),
+            /*#__PURE__*/ React.createElement("span", {
+                className: "hidden sm:inline text-xs"
+            }, l.label)
+        )
+    ));
+}
+
+// ============================================
 // Authentication System
 // NS: Simple session-based auth. Sessions stored server-side.
 // Passwords hashed with bcrypt on backend.
 // ============================================
+
 const AuthContext=createContext();function AuthProvider({children}){const{applyLanguage}=useTranslation();const[user,setUser]=useState(null);// NS: Security fix - session cookie is HttpOnly (can't be stolen by XSS)
 // But we also keep sessionId in memory for WebSocket auth (not in localStorage!)
 const[sessionId,setSessionId]=useState(null);const[isAuthenticated,setIsAuthenticated]=useState(false);const[loading,setLoading]=useState(true);const[error,setError]=useState(null);const[passwordExpiry,setPasswordExpiry]=useState(null);// LW: Track password expiration
