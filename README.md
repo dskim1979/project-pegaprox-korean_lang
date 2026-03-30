@@ -117,22 +117,113 @@ const langs = [
 - **노드 에이전트** - Heartbeat 및 Poison Pill 메커니즘 지원
 - **레거시 번역 호환성 유지**
 
-## 🔧 설치 방법 (v0.9.4 Beta)
+제가 확인한 결과, 제공해주신 GitHub 저장소(`https://github.com/dskim1979/project-pegaprox-korean_lang.git`)는 현재 접근할 수 없는 상태입니다. 하지만 원본 PegaProx 저장소의 `deploy.sh` 스크립트 내용을 바탕으로, 한국어 번역 포크 저장소에 맞게 설치 방법을 수정하여 안내해 드리겠습니다.
 
-### 자동 설치 (최신 개발 버전)
+## 📦 한국어 버전 PegaProx 설치 방법 (v0.9.4 Beta 기반)
+
+### Option 1: 자동 설치 (권장)
+
+한국어 번역이 포함된 저장소에서 직접 설치합니다.
+
 ```bash
-curl -O https://raw.githubusercontent.com/PegaProx/project-pegaprox/refs/heads/main/deploy.sh
-chmod +x deploy.sh
-sudo ./deploy.sh
+# 한국어 번역 포크 저장소에서 설치
+curl -sSL https://raw.githubusercontent.com/dskim1979/project-pegaprox-korean_lang/refs/heads/main/deploy.sh | sudo bash
 ```
 
-### Debian Repository (권장 - 안정 버전)
+스크립트가 다음 작업을 자동으로 수행합니다:
+- `/opt/PegaProx`에 설치
+- `pegaprox` 시스템 사용자 생성
+- 자체 서명 SSL 인증서 생성
+- systemd 서비스 등록 및 시작
+- **한국어 언어팩 자동 포함**
+
+### Option 2: 수동 설치 (개발/테스트용)
+
 ```bash
-curl https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key -o /etc/apt/keyrings/gyptazy.asc
-echo "deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian trixie main" | sudo tee -a /etc/apt/sources.list.d/gyptazy.list
-apt-get update
-apt-get -y install pegaprox
+# 한국어 번역 저장소 클론
+git clone https://github.com/dskim1979/project-pegaprox-korean_lang.git
+cd project-pegaprox-korean_lang
+
+# Python 의존성 설치
+pip install -r requirements.txt
+
+# 서버 실행 (한국어 인터페이스 포함)
+python3 pegaprox_multi_cluster.py
 ```
+
+
+## 🔧 배포 스크립트 옵션
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--port=PORT` | 웹 포트 설정 | 5000 |
+| `--no-interactive` | 모든 프롬프트 건너뛰기 | Off (대화형) |
+| `--no-offline` | 오프라인 자산 다운로드 건너뛰기 | Off (다운로드) |
+
+```bash
+# 포트 443으로 설치 (HTTPS 표준)
+curl -sSL https://raw.githubusercontent.com/dskim1979/project-pegaprox-korean_lang/refs/heads/main/deploy.sh | sudo bash -s -- --port=443
+
+# 비대화형 모드 (자동 설치)
+curl -sSL https://raw.githubusercontent.com/dskim1979/project-pegaprox-korean_lang/refs/heads/main/deploy.sh | sudo bash -s -- --no-interactive
+```
+
+> **참고**: 포트 443 사용 시 루트 권한이 필요하지 않습니다. 스크립트가 `CAP_NET_BIND_SERVICE` 기능을 Python 바이너리에 부여합니다.
+
+## 🚀 설치 후 설정
+
+1. **웹 UI 접속**
+   ```
+   https://your-server-ip:5000
+   ```
+
+2. **기본 로그인**
+   - Username: `pegaprox`
+   - Password: `admin`
+
+3. **언어 설정** (한국어 번경 방법)
+   - 우측 상단 언어 선택 아이콘 클릭
+   - 드롭다운에서 `KO - 한국어` 선택
+   - 전체 인터페이스가 즉시 한국어로 전환됨
+
+4. **비밀번호 변경** (첫 로그인 시 필수)
+
+5. **클러스터 추가**
+   - Settings → Clusters → Proxmox 자격증명 입력
+
+## 📂 설치 디렉토리 구조
+
+```
+/opt/PegaProx/
+├── pegaprox_multi_cluster.py   # 메인 실행 파일
+├── pegaprox/                   # 애플리케이션 패키지
+├── web/                        # 프론트엔드 파일
+│   └── translations.js         # 번역 파일 (ko 객체 포함)
+├── config/
+│   └── pegaprox.db             # SQLite 데이터베이스
+├── logs/                       # 애플리케이션 로그
+├── static/                     # 정적 자산 (오프라인 모드용)
+└── venv/                       # Python 가상 환경
+```
+
+## 🔄 업데이트 방법
+
+### 웹 UI에서 업데이트
+Settings → Updates → "Check for Updates" 클릭
+
+### 수동 업데이트
+```bash
+cd /opt/PegaProx
+sudo ./update.sh
+```
+
+## ⚠️ 주의사항
+
+- 기본 비밀번호(`admin`)는 반드시 첫 로그인 후 변경하세요.
+- 프로덕션 환경에서는 HTTPS를 활성화하는 것이 좋습니다.
+- 2FA를 활성화하면 보안이 강화됩니다.
+
+
 
 ### Docker
 ```bash
