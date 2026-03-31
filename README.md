@@ -1,4 +1,4 @@
-# PegaProx 한국어 번역 프로젝트 소개 (v0.9.4 Beta)
+<img width="1905" height="902" alt="image" src="https://github.com/user-attachments/assets/4f17ceb3-d706-495e-888c-8ef60f81bd83" /># PegaProx 한국어 번역 프로젝트 소개 (v0.9.4 Beta)
 
 ## 📌 프로젝트 개요
 
@@ -150,6 +150,7 @@ pip install -r requirements.txt
 # 서버 실행 (한국어 인터페이스 포함)
 python3 pegaprox_multi_cluster.py
 ```
+<img width="1905" height="902" alt="image" src="https://github.com/user-attachments/assets/71c1eb8f-d26a-4e8f-aff0-8b1dcd8ad9ac" />
 
 
 ## 🔧 배포 스크립트 옵션
